@@ -1,0 +1,35 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build on Linux
+        run: cargo build --release
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ytapilegacy-linux-x64
+          path: target/release/ytapilegacy
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build on Windows
+        run: cargo build --release
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ytapilegacy-windows-x64
+          path: target\release\ytapilegacy.exe
