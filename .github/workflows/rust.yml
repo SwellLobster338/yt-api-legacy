@@ -10,30 +10,26 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            artifact_name: ytapilegacy-linux-x64
-            bin_path: target/release/ytapilegacy
-
-          - os: windows-latest
-            artifact_name: ytapilegacy-windows-x64
-            bin_path: target/release/ytapilegacy.exe
-
+  build-linux:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust
-        run: rustup update stable
-
-      - name: Build
+      - name: Build on Linux
         run: cargo build --release
-
-      - name: Upload artifact
+      - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact_name }}
-          path: ${{ matrix.bin_path }}
+          name: ytapilegacy-linux-x64
+          path: target/release/ytapilegacy
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build on Windows
+        run: cargo build --release
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ytapilegacy-windows-x64
+          path: target\release\ytapilegacy.exe
