@@ -32,7 +32,7 @@ jobs:
       shell: bash
       run: |
         if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-          Compress-Archive -Path target/release/yt-api-legacy.exe -DestinationPath yt-api-legacy-windows.zip
+          7z a yt-api-legacy-windows.zip target/release/yt-api-legacy.exe
         else
           tar -czf yt-api-legacy-linux.tar.gz -C target/release yt-api-legacy
         fi
