@@ -29,9 +29,10 @@ jobs:
       run: cargo build --release
 
     - name: Package artifact
+      shell: bash
       run: |
         if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-          powershell Compress-Archive -Path target\release\yt-api-legacy.exe -DestinationPath yt-api-legacy-windows.zip
+          Compress-Archive -Path target/release/yt-api-legacy.exe -DestinationPath yt-api-legacy-windows.zip
         else
           tar -czf yt-api-legacy-linux.tar.gz -C target/release yt-api-legacy
         fi
