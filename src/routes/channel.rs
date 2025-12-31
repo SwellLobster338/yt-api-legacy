@@ -112,6 +112,11 @@ async fn fetch_channel_videos(
         .and_then(|u| u.as_str())
         .unwrap_or("")
         .to_string();
+    let banner = if banner.starts_with("//") {
+        format!("https:{}", banner)
+    } else {
+        banner
+    };
     
     let subscriber_count = channel_info_value
         .get("statistics")
@@ -137,7 +142,8 @@ async fn fetch_channel_videos(
             .to_string(),
         thumbnail: format!("{}/channel_icon/{}", base.trim_end_matches('/'), channel_id),
         banner: if !banner.is_empty() {
-            format!("{}/channel_icon/{}", base.trim_end_matches('/'), banner)
+            let encoded = urlencoding::encode(&banner);
+            format!("{}/channel_icon/{}", base.trim_end_matches('/'), encoded)
         } else {
             "".to_string()
         },
