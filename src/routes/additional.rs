@@ -8,6 +8,15 @@ use uuid::Uuid;
 use crate::routes::auth::AuthConfig;
 use crate::config::Config;
 use std::fs;
+fn base_url(req: &HttpRequest, config: &crate::config::Config) -> String {
+    if !config.server.mainurl.is_empty() {
+        return config.server.mainurl.clone();
+    }
+    let info = req.connection_info();
+    let scheme = info.scheme();
+    let host = info.host();
+    format!("{}://{}/", scheme, host.trim_end_matches('/'))
+}
 
 #[derive(Serialize, ToSchema)]
 pub struct RecommendationItem {
@@ -43,11 +52,7 @@ pub struct HistoryItem {
     pub duration: String,
     pub watched_at: String,
     pub thumbnail: String,
-}
-
-#[derive(Serialize, ToSchema)]
-pub struct HistoryResponse {
-    pub items: Vec<HistoryItem>,
+    pub channel_thumbnail: String,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -177,6 +182,204 @@ fn parse_recommendations(json_data: &serde_json::Value, max_videos: usize) -> Ve
     videos
 }
 
+async fn fetch_history_page(
+    access_token: &str,
+    continuation: Option<String>,
+    config: &crate::config::Config,
+) -> Option<serde_json::Value> {
+    let client = Client::new();
+    let mut payload = serde_json::json!({
+        "context": {
+            "client": {
+                "hl": "en", "gl": "US", "deviceMake": "Samsung", "deviceModel": "SmartTV",
+                "userAgent": "Mozilla/5.0 (SMART-TV; Linux; Tizen 5.0) AppleWebKit/538.1",
+                "clientName": "TVHTML5", "clientVersion": "7.20250209.19.00",
+                "osName": "Tizen", "osVersion": "5.0", "platform": "TV",
+                "clientFormFactor": "UNKNOWN_FORM_FACTOR", "screenPixelDensity": 1
+            }
+        },
+        "browseId": "FEhistory"
+    });
+    if let Some(cont) = continuation {
+        payload["continuation"] = serde_json::Value::String(cont);
+    }
+    let url = format!(
+        "https://www.youtube.com/youtubei/v1/browse?key={}",
+        config.get_api_key_rotated()
+    );
+    let res = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", access_token))
+        .json(&payload)
+        .send()
+        .await
+        .ok()?;
+    res.json::<serde_json::Value>().await.ok()
+}
+
+fn find_continuation_token(json_data: &serde_json::Value) -> Option<String> {
+    if let Some(token) = json_data
+        .get("continuationContents")
+        .and_then(|c| c.get("gridContinuation"))
+        .and_then(|g| g.get("continuations"))
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.get(0))
+        .and_then(|c| c.get("nextContinuationData"))
+        .and_then(|n| n.get("continuation"))
+        .and_then(|c| c.as_str())
+    {
+        return Some(token.to_string());
+    }
+    if let Some(actions) = json_data.get("onResponseReceivedActions").and_then(|a| a.as_array()) {
+        for action in actions {
+            if let Some(items) = action
+                .get("appendContinuationItemsAction")
+                .and_then(|a| a.get("items"))
+                .and_then(|i| i.as_array())
+            {
+                for item in items {
+                    if let Some(token) = item
+                        .get("continuationItemRenderer")
+                        .and_then(|c| c.get("continuationEndpoint"))
+                        .and_then(|e| e.get("continuationCommand"))
+                        .and_then(|c| c.get("token"))
+                        .and_then(|t| t.as_str())
+                    {
+                        return Some(token.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn parse_history_tile(tile: &serde_json::Value, base_trimmed: &str) -> Option<HistoryItem> {
+    let video_id = tile
+        .get("onSelectCommand")
+        .and_then(|c| c.get("watchEndpoint"))
+        .and_then(|w| w.get("videoId"))
+        .and_then(|v| v.as_str())?;
+    let title = tile
+        .get("metadata")
+        .and_then(|m| m.get("tileMetadataRenderer"))
+        .and_then(|t| t.get("title"))
+        .and_then(|t| t.get("simpleText"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("No Title")
+        .to_string();
+    let author = "Unknown".to_string();
+    let duration = tile
+        .get("header")
+        .and_then(|h| h.get("tileHeaderRenderer"))
+        .and_then(|t| t.get("thumbnailOverlays"))
+        .and_then(|o| o.as_array())
+        .and_then(|arr| arr.get(0))
+        .and_then(|o| o.get("thumbnailOverlayTimeStatusRenderer"))
+        .and_then(|t| t.get("text"))
+        .and_then(|t| t.get("simpleText"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("0:00")
+        .to_string();
+    let watched_at = tile
+        .get("metadata")
+        .and_then(|m| m.get("tileMetadataRenderer"))
+        .and_then(|t| t.get("lines"))
+        .and_then(|l| l.as_array())
+        .and_then(|arr| arr.get(1))
+        .and_then(|line| line.get("lineRenderer"))
+        .and_then(|l| l.get("items"))
+        .and_then(|i| i.as_array())
+        .and_then(|arr| arr.get(2))
+        .and_then(|li| li.get("lineItemRenderer"))
+        .and_then(|l| l.get("text"))
+        .and_then(|t| t.get("simpleText"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    
+    Some(HistoryItem {
+        video_id: video_id.to_string(),
+        title,
+        author,
+        views: "0".to_string(),
+        duration,
+        watched_at,
+        thumbnail: format!("{}/thumbnail/{}", base_trimmed, video_id),
+        channel_thumbnail: String::new(),
+    })
+}
+
+fn extract_history_data_with_continuation(
+    json_data: serde_json::Value,
+    max_videos: usize,
+    base_trimmed: &str,
+) -> (Vec<HistoryItem>, Option<String>) {
+    let mut videos = Vec::new();
+    let mut continuation = find_continuation_token(&json_data);
+    
+    if let Some(contents) = json_data
+        .get("contents")
+        .and_then(|c| c.get("tvBrowseRenderer"))
+        .and_then(|t| t.get("content"))
+        .and_then(|c| c.get("tvSurfaceContentRenderer"))
+        .and_then(|c| c.get("content"))
+    {
+        if let Some(items) = contents
+            .get("gridRenderer")
+            .and_then(|g| g.get("items"))
+            .and_then(|i| i.as_array())
+        {
+            for item in items {
+                if videos.len() >= max_videos {
+                    break;
+                }
+                if let Some(tile) = item.get("tileRenderer") {
+                    if let Some(parsed) = parse_history_tile(tile, base_trimmed) {
+                        videos.push(parsed);
+                    }
+                }
+            }
+        }
+        if videos.len() < max_videos {
+            if let Some(actions) = json_data
+                .get("onResponseReceivedActions")
+                .and_then(|a| a.as_array())
+            {
+                for action in actions {
+                    if let Some(items) = action
+                        .get("appendContinuationItemsAction")
+                        .and_then(|a| a.get("items"))
+                        .and_then(|i| i.as_array())
+                    {
+                        for item in items {
+                            if videos.len() >= max_videos {
+                                break;
+                            }
+                            if let Some(tile) = item.get("tileRenderer") {
+                                if let Some(parsed) = parse_history_tile(tile, base_trimmed) {
+                                    videos.push(parsed);
+                                }
+                            }
+                            if continuation.is_none() {
+                                continuation = item
+                                    .get("continuationItemRenderer")
+                                    .and_then(|c| c.get("continuationEndpoint"))
+                                    .and_then(|e| e.get("continuationCommand"))
+                                    .and_then(|c| c.get("token"))
+                                    .and_then(|t| t.as_str())
+                                    .map(|s| s.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    (videos, continuation)
+}
+
 #[utoipa::path(
     get,
     path = "/get_recommendations.php",
@@ -194,6 +397,8 @@ pub async fn get_recommendations(
     data: web::Data<crate::AppState>,
     auth_config: web::Data<AuthConfig>,
 ) -> impl Responder {
+    let base = base_url(&req, &data.config);
+    let base_trimmed = base.trim_end_matches('/');
     let mut query_params: HashMap<String, String> = HashMap::new();
     for pair in req.query_string().split('&') {
         let mut parts = pair.split('=');
@@ -260,13 +465,12 @@ pub async fn get_recommendations(
     
     match res {
         Ok(response) => {
-            match response.json::<serde_json::Value>().await {
-                Ok(json_data) => {
-                    let mut recommendations = parse_recommendations(&json_data, count);
-                    // enrich thumbnails
-                    for item in &mut recommendations {
-                        item.thumbnail = format!("{}thumbnail/{}", data.config.server.mainurl.trim_end_matches('/'), item.video_id);
-                    }
+                    match response.json::<serde_json::Value>().await {
+                        Ok(json_data) => {
+                            let mut recommendations = parse_recommendations(&json_data, count);
+                            for item in &mut recommendations {
+                                item.thumbnail = format!("{}/thumbnail/{}", base_trimmed, item.video_id);
+                            }
                     HttpResponse::Ok().json(recommendations)
                 }
                 Err(e) => {
@@ -302,6 +506,8 @@ pub async fn get_subscriptions(
     data: web::Data<crate::AppState>,
     auth_config: web::Data<AuthConfig>,
 ) -> impl Responder {
+    let base = base_url(&req, &data.config);
+    let base_trimmed = base.trim_end_matches('/');
     let mut query_params: HashMap<String, String> = HashMap::new();
     for pair in req.query_string().split('&') {
         let mut parts = pair.split('=');
@@ -380,12 +586,18 @@ pub async fn get_subscriptions(
                                     .and_then(|b| b.as_str())
                                     .unwrap_or("unknown");
                                 
+                                let mut thumb_url = thumb_url.to_string();
+                                if thumb_url.starts_with("//") {
+                                    thumb_url = format!("https:{}", thumb_url);
+                                }
+                                let encoded_thumb = urlencoding::encode(&thumb_url);
+                                
                                 subs.push(SubscriptionItem {
                                     channel_id: channel_id.to_string(),
                                     title: username.to_string(),
                                     thumbnail: thumb_url.to_string(),
-                                    local_thumbnail: format!("{}channel_icon/{}", data.config.server.mainurl.trim_end_matches('/'), thumb_url),
-                                    profile_url: format!("{}get_author_videos.php?author={}", data.config.server.mainurl, username),
+                                    local_thumbnail: format!("{}/channel_icon/{}", base_trimmed, encoded_thumb),
+                                    profile_url: format!("{}get_author_videos.php?author={}", base_trimmed, username),
                                 });
                             }
                         }
@@ -422,7 +634,7 @@ pub async fn get_subscriptions(
         ("count" = Option<i32>, Query, description = "Number of videos to return (default: 50)")
     ),
     responses(
-        (status = 200, description = "Watch history", body = HistoryResponse),
+        (status = 200, description = "Watch history", body = [HistoryItem]),
         (status = 400, description = "Missing token")
     )
 )]
@@ -431,6 +643,8 @@ pub async fn get_history(
     data: web::Data<crate::AppState>,
     auth_config: web::Data<AuthConfig>,
 ) -> impl Responder {
+    let base = base_url(&req, &data.config);
+    let base_trimmed = base.trim_end_matches('/');
     let mut query_params: HashMap<String, String> = HashMap::new();
     for pair in req.query_string().split('&') {
         let mut parts = pair.split('=');
@@ -462,109 +676,23 @@ pub async fn get_history(
         }
     };
     
-    let client = Client::new();
-    let payload = serde_json::json!({
-        "context": {
-            "client": {
-                "hl": "en", "gl": "US", "deviceMake": "Samsung", "deviceModel": "SmartTV",
-                "userAgent": "Mozilla/5.0 (SMART-TV; Linux; Tizen 5.0) AppleWebKit/538.1",
-                "clientName": "TVHTML5", "clientVersion": "7.20250209.19.00",
-                "osName": "Tizen", "osVersion": "5.0", "platform": "TV",
-                "clientFormFactor": "UNKNOWN_FORM_FACTOR", "screenPixelDensity": 1
-            }
-        },
-        "browseId": "FEhistory"
-    });
+    let mut videos: Vec<HistoryItem> = Vec::new();
+    let mut continuation: Option<String> = None;
     
-    let url = format!(
-        "https://www.youtube.com/youtubei/v1/browse?key={}",
-        data.config.get_api_key_rotated()
-    );
-    
-    let res = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", access_token))
-        .json(&payload)
-        .send()
-        .await;
-    
-    match res {
-        Ok(response) => {
-            match response.json::<serde_json::Value>().await {
-                Ok(json_data) => {
-                    let mut items = Vec::new();
-                    if let Some(contents) = json_data
-                        .get("contents")
-                        .and_then(|c| c.get("tvBrowseRenderer"))
-                        .and_then(|t| t.get("content"))
-                        .and_then(|c| c.get("tvSurfaceContentRenderer"))
-                        .and_then(|c| c.get("content"))
-                        .and_then(|c| c.get("gridRenderer"))
-                        .and_then(|g| g.get("items"))
-                        .and_then(|i| i.as_array()) {
-                        for item in contents.iter().take(count) {
-                            if let Some(tile) = item.get("tileRenderer") {
-                                if let Some(video_id) = tile
-                                    .get("onSelectCommand")
-                                    .and_then(|c| c.get("watchEndpoint"))
-                                    .and_then(|w| w.get("videoId"))
-                                    .and_then(|v| v.as_str()) {
-                                    
-                                    let title = tile
-                                        .get("metadata")
-                                        .and_then(|m| m.get("tileMetadataRenderer"))
-                                        .and_then(|t| t.get("title"))
-                                        .and_then(|t| t.get("simpleText"))
-                                        .and_then(|t| t.as_str())
-                                        .unwrap_or("No Title")
-                                        .to_string();
-                                    
-                                    let author = "Unknown".to_string();
-                                    
-                                    let duration = tile
-                                        .get("header")
-                                        .and_then(|h| h.get("tileHeaderRenderer"))
-                                        .and_then(|t| t.get("thumbnailOverlays"))
-                                        .and_then(|o| o.as_array())
-                                        .and_then(|arr| arr.get(0))
-                                        .and_then(|o| o.get("thumbnailOverlayTimeStatusRenderer"))
-                                        .and_then(|t| t.get("text"))
-                                        .and_then(|t| t.get("simpleText"))
-                                        .and_then(|t| t.as_str())
-                                        .unwrap_or("0:00")
-                                        .to_string();
-                                    
-                                    items.push(HistoryItem {
-                                        video_id: video_id.to_string(),
-                                        title,
-                                        author,
-                                        views: "0".to_string(),
-                                        duration,
-                                        watched_at: "".to_string(),
-                                        thumbnail: format!("{}thumbnail/{}", data.config.server.mainurl.trim_end_matches('/'), video_id),
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    
-                    HttpResponse::Ok().json(HistoryResponse { items })
-                }
-                Err(e) => {
-                    crate::log::info!("Error parsing history: {}", e);
-                    HttpResponse::InternalServerError().json(serde_json::json!({
-                        "error": "Failed to parse response"
-                    }))
-                }
-            }
+    while videos.len() < count {
+        let page = fetch_history_page(&access_token, continuation.clone(), &data.config).await;
+        if page.is_none() {
+            break;
         }
-        Err(e) => {
-            crate::log::info!("Error calling history API: {}", e);
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to call history API"
-            }))
+        let (mut page_items, next) = extract_history_data_with_continuation(page.unwrap(), count - videos.len(), base_trimmed);
+        videos.append(&mut page_items);
+        if next.is_none() {
+            break;
         }
+        continuation = next;
     }
+    
+    HttpResponse::Ok().json(videos)
 }
 
 #[utoipa::path(
@@ -653,7 +781,6 @@ pub async fn mark_video_watched(
     
     if let Ok(resp) = player_resp {
         if resp.status().is_success() {
-            // best-effort feedback
             let feedback_payload = serde_json::json!({
                 "context": context["context"],
                 "feedbackTokens": []
@@ -687,7 +814,6 @@ pub async fn mark_video_watched(
 pub async fn get_instants(
     data: web::Data<crate::AppState>,
 ) -> impl Responder {
-    // Живое обновление: пытаемся перечитать config.yml на каждый запрос.
     let instants = match fs::read_to_string("config.yml") {
         Ok(contents) => {
             if let Ok(parsed) = serde_yaml::from_str::<Config>(&contents) {

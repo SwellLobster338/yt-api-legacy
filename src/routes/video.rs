@@ -16,6 +16,16 @@ use utoipa::ToSchema;
 use chrono::DateTime;
 use urlencoding;
 
+fn base_url(req: &HttpRequest, config: &crate::config::Config) -> String {
+    if !config.server.mainurl.is_empty() {
+        return config.server.mainurl.clone();
+    }
+    let info = req.connection_info();
+    let scheme = info.scheme();
+    let host = info.host();
+    format!("{}://{}/", scheme, host.trim_end_matches('/'))
+}
+
 lazy_static! {
     static ref THUMBNAIL_CACHE: Arc<Mutex<LruCache<String, (Vec<u8>, String, u64)>>> = 
         Arc::new(Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1000).unwrap())));
@@ -115,7 +125,6 @@ async fn proxy_stream_response(
             
             let mut builder = HttpResponse::build(status);
             for (key, value) in headers.iter() {
-                // Skip hop-by-hop headers
                 if key == "connection" || key == "transfer-encoding" {
                     continue;
                 }
@@ -558,6 +567,8 @@ pub async fn get_ytvideo_info(
     data: web::Data<crate::AppState>,
 ) -> impl Responder {
     let config = &data.config;
+    let base = base_url(&req, config);
+    let base_trimmed = base.trim_end_matches('/');
     
 
     let mut query_params: HashMap<String, String> = HashMap::new();
@@ -679,13 +690,13 @@ pub async fn get_ytvideo_info(
                     
 
                     let final_video_url = if config.video.video_source == "direct" {
-                        format!("{}direct_url?video_id={}&quality={}", config.server.mainurl, video_id, quality)
+                        format!("{}/direct_url?video_id={}&quality={}", base_trimmed, video_id, quality)
                     } else {
                         "".to_string()
                     };
                     
                     let final_video_url_with_proxy = if config.proxy.use_video_proxy && !final_video_url.is_empty() {
-                        format!("{}video.proxy?url={}", config.server.mainurl, urlencoding::encode(&final_video_url))
+                        format!("{}/video.proxy?url={}", base_trimmed, urlencoding::encode(&final_video_url))
                     } else {
                         final_video_url.clone()
                     };
@@ -723,11 +734,22 @@ pub async fn get_ytvideo_info(
                                                     .unwrap_or("")
                                                     .to_string();
                                                 
-                        let author_thumbnail = if config.proxy.use_channel_thumbnail_proxy {
-                            format!("{}channel_icon/{}", config.server.mainurl.trim_end_matches('/'), channel_id)
-                        } else {
-                            "".to_string()
-                        };
+                                                let raw_thumb = comment_snippet
+                                                    .get("authorProfileImageUrl")
+                                                    .and_then(|u| u.as_str())
+                                                    .unwrap_or("")
+                                                    .to_string();
+                                                let mut thumb = raw_thumb.clone();
+                                                if thumb.starts_with("//") {
+                                                    thumb = format!("https:{}", thumb);
+                                                }
+                                                let author_thumbnail = if thumb.is_empty() {
+                                                    "https://yt3.googleusercontent.com/a/default-user=s88-c-k-c0x00ffffff-no-rj".to_string()
+                                                } else if config.proxy.use_channel_thumbnail_proxy {
+                                                    format!("{}/channel_icon/{}", base_trimmed, urlencoding::encode(&thumb))
+                                                } else {
+                                                    thumb
+                                                };
                                                 
                                                 comments.push(Comment {
                                                     author,
@@ -793,8 +815,8 @@ pub async fn get_ytvideo_info(
                             .and_then(|c| c.as_str())
                             .map(|s| s.to_string()),
                         comments,
-                        channel_thumbnail: format!("{}channel_icon/{}", config.server.mainurl.trim_end_matches('/'), channel_id),
-                        thumbnail: format!("{}thumbnail/{}", config.server.mainurl.trim_end_matches('/'), video_id),
+                        channel_thumbnail: format!("{}/channel_icon/{}", base.trim_end_matches('/'), channel_id),
+                        thumbnail: format!("{}/thumbnail/{}", base.trim_end_matches('/'), video_id),
                         video_url: final_video_url_with_proxy,
                     };
                     
@@ -839,6 +861,8 @@ pub async fn get_related_videos(
     data: web::Data<crate::AppState>,
 ) -> impl Responder {
     let config = &data.config;
+    let base = base_url(&req, config);
+    let base_trimmed = base.trim_end_matches('/');
     
     let mut query_params: HashMap<String, String> = HashMap::new();
     for pair in req.query_string().split('&') {
@@ -862,27 +886,22 @@ pub async fn get_related_videos(
         .map(|q| q.clone())
         .unwrap_or_else(|| config.video.default_quality.clone());
     
-    // Handle count parameter (backward compatibility)
     let count_param: i32 = query_params.get("count")
         .and_then(|c| c.parse().ok())
         .unwrap_or(config.video.default_count as i32);
     
-    // Handle limit parameter (takes precedence over count)
     let limit: i32 = query_params.get("limit")
         .and_then(|l| l.parse().ok())
         .unwrap_or(count_param);
     
-    // Handle offset parameter
     let offset: i32 = query_params.get("offset")
         .and_then(|o| o.parse().ok())
         .unwrap_or(0);
     
-    // Handle order parameter
     let order = query_params.get("order")
         .map(|o| o.as_str())
         .unwrap_or("relevance");
     
-    // Validate order parameter
     let valid_orders = ["relevance", "date", "rating", "viewCount", "title"];
     let search_order = if valid_orders.contains(&order) {
         order
@@ -890,13 +909,11 @@ pub async fn get_related_videos(
         "relevance"
     };
     
-    // Ensure limit is within reasonable bounds
     let max_results = limit.min(50).max(1);
     
     let apikey = config.get_api_key_rotated();
     let client = Client::new();
     
-    // First, get the video information to create a search query
     let video_url = format!(
         "https://www.googleapis.com/youtube/v3/videos?part=snippet&id={}&key={}",
         video_id, apikey
@@ -911,15 +928,12 @@ pub async fn get_related_videos(
                     if let Some(video_items) = video_data.get("items").and_then(|i| i.as_array()) {
                         if !video_items.is_empty() {
                             if let Some(video_info) = video_items[0].get("snippet") {
-                                // Create search query based on the video title
                                 let title = video_info.get("title")
                                     .and_then(|t| t.as_str())
                                     .unwrap_or("");
                                 
-                                // Use the first word of the title for search
                                 let search_query = title.split_whitespace().next().unwrap_or(title);
                                 
-                                // Search for related videos with ordering
                                 let search_url = format!(
                                     "https://www.googleapis.com/youtube/v3/search?part=snippet&q={}&type=video&maxResults={}&order={}&key={}",
                                     urlencoding::encode(search_query),
@@ -933,20 +947,17 @@ pub async fn get_related_videos(
                                         match search_resp.json::<serde_json::Value>().await {
                                             Ok(search_data) => {
                                                 if let Some(search_items) = search_data.get("items").and_then(|i| i.as_array()) {
-                                                    // Apply offset and limit manually since YouTube API doesn't support offset directly
                                                     let start_index = offset as usize;
                                                     let end_index = (offset + max_results) as usize;
                                                     
-                                                    // Slice the results according to offset and limit
                                                     let paginated_items = if start_index < search_items.len() {
                                                         let actual_end = std::cmp::min(end_index, search_items.len());
                                                         &search_items[start_index..actual_end]
                                                     } else {
-                                                        &[][..] // Empty slice if offset is beyond available items
+                                                        &[][..]
                                                     };
                                                     
                                                     for video in paginated_items {
-                                                        // Skip the original video
                                                         if let Some(vid) = video.get("id").and_then(|id| id.get("videoId")).and_then(|v| v.as_str()) {
                                                             if vid == video_id {
                                                                 continue;
@@ -973,20 +984,19 @@ pub async fn get_related_videos(
                                                                     .unwrap_or("")
                                                                     .to_string();
                                                                 
-                                                                let thumbnail = format!("{}thumbnail/{}", config.server.mainurl.trim_end_matches('/'), vid);
+                                                                let thumbnail = format!("{}/thumbnail/{}", base_trimmed, vid);
                                                                 
-                                                                let channel_thumbnail = format!("{}channel_icon/{}", config.server.mainurl.trim_end_matches('/'), if channel_id.is_empty() { vid } else { channel_id.as_str() });
+                                                                let channel_thumbnail = format!("{}/channel_icon/{}", base_trimmed, if channel_id.is_empty() { vid } else { channel_id.as_str() });
                                                                 
-                                                                let video_url = format!("{}get-ytvideo-info.php?video_id={}&quality={}", 
-                                                                    config.server.mainurl, vid, quality);
+                                                                let video_url = format!("{}/get-ytvideo-info.php?video_id={}&quality={}", 
+                                                                    base_trimmed, vid, quality);
                                                                 
                                                                 let final_url = if config.proxy.use_video_proxy {
-                                                                    format!("{}video.proxy?url={}", config.server.mainurl, urlencoding::encode(&video_url))
+                                                                    format!("{}/video.proxy?url={}", base_trimmed, urlencoding::encode(&video_url))
                                                                 } else {
                                                                     video_url
                                                                 };
                                                                 
-                                                                // Get view count
                                                                 let stats_url = format!(
                                                                     "https://www.googleapis.com/youtube/v3/videos?part=statistics&id={}&key={}",
                                                                     vid, apikey

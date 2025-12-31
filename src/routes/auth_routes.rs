@@ -52,7 +52,6 @@ fn load_sessions() -> Vec<YouTubeSession> {
 }
 
 fn save_sessions(sessions: &Vec<YouTubeSession>) -> Result<(), std::io::Error> {
-    // Create directory if it doesn't exist
     if let Some(parent) = Path::new(TOKENS_FILE_PATH).parent() {
         fs::create_dir_all(parent)?;
     }
@@ -119,7 +118,6 @@ pub async fn check_if_username_is_taken(
 pub async fn link_device_token(
     body: web::Bytes,
 ) -> impl Responder {
-    // Parse JSON body
     let json_str = match std::str::from_utf8(&body) {
         Ok(s) => s,
         Err(_) => {
@@ -151,40 +149,34 @@ pub async fn link_device_token(
     let access_token = data.get("access_token").and_then(|a| a.as_str()).unwrap_or("").to_string();
     let refresh_token = data.get("refresh_token").and_then(|r| r.as_str()).unwrap_or("").to_string();
 
-    // Load existing sessions
     let mut sessions = load_sessions();
 
-    // Check if username is already taken
     if !username.is_empty() && sessions.iter().any(|s| s.username == username) {
         return HttpResponse::BadRequest().body("Username taken");
     }
 
-    // Find existing session with this device_id
     let existing_session = sessions.iter_mut().find(|s| s.device_id == device_id);
 
     if let Some(session) = existing_session {
-        // Update existing session
         if !session.is_linked {
             session.username = username;
             session.password = password;
             session.access_token = access_token;
             session.refresh_token = refresh_token;
-            session.is_linked = true; // Simplified - in real implementation would validate token
+            session.is_linked = true;
         }
     } else {
-        // Create new session
         let new_session = YouTubeSession {
             device_id,
             username,
             password,
             access_token,
             refresh_token,
-            is_linked: true, // Simplified - in real implementation would validate token
+            is_linked: true,
         };
         sessions.push(new_session);
     }
 
-    // Save sessions
     if let Err(_) = save_sessions(&sessions) {
         return HttpResponse::InternalServerError().body("Failed to save sessions");
     }
@@ -205,7 +197,6 @@ pub async fn link_device_token(
 pub async fn get_session(
     body: web::Bytes,
 ) -> impl Responder {
-    // Parse form data
     let form_str = match std::str::from_utf8(&body) {
         Ok(s) => s,
         Err(_) => {
@@ -260,7 +251,6 @@ pub async fn get_session(
 pub async fn client_login(
     body: web::Bytes,
 ) -> impl Responder {
-    // Parse form data
     let form_str = match std::str::from_utf8(&body) {
         Ok(s) => s,
         Err(_) => {
@@ -308,7 +298,6 @@ pub async fn client_login(
 pub async fn youtube_client_login(
     body: web::Bytes,
 ) -> impl Responder {
-    // This is the same as client_login
     client_login(body).await
 }
 
@@ -323,7 +312,6 @@ pub async fn youtube_client_login(
 pub async fn oauth2_token(
     body: web::Bytes,
 ) -> impl Responder {
-    // Parse form data
     let form_str = match std::str::from_utf8(&body) {
         Ok(s) => s,
         Err(_) => {

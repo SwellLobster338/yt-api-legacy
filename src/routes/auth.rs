@@ -8,7 +8,7 @@ use uuid::Uuid;
 use image::{DynamicImage, Rgb, RgbImage};
 use base64::{Engine as _, engine::general_purpose};
 use reqwest;
-use tokio;
+use actix_web::cookie::{Cookie, SameSite};
 
 pub struct TokenStore {
     tokens: Arc<Mutex<HashMap<String, String>>>,
@@ -213,7 +213,9 @@ pub async fn auth_handler(
     data: web::Data<AuthConfig>,
     token_store: web::Data<TokenStore>,
 ) -> impl Responder {
-    let session_id = Uuid::new_v4().to_string();
+    let session_id = req.cookie("session_id")
+        .map(|c| c.value().to_string())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
     
     let refresh_token = req.headers().get("refresh_token")
         .and_then(|h| h.to_str().ok())
@@ -240,7 +242,15 @@ pub async fn auth_handler(
     
     let auth_url = get_auth_url(&data, &session_id);
     let qr_base64 = generate_qr_code(&auth_url);
+    
+    let cookie = Cookie::build("session_id", session_id.clone())
+        .path("/")
+        .same_site(SameSite::Lax)
+        .http_only(false)
+        .finish();
+    
     HttpResponse::Ok()
+        .insert_header(("Set-Cookie", cookie.to_string()))
         .content_type("text/html; charset=utf-8")
         .body(format!("<ytreq>{}</ytreq>", qr_base64))
 }
@@ -256,14 +266,12 @@ pub async fn auth_events(
     query: web::Query<HashMap<String, String>>,
     token_store: web::Data<TokenStore>,
 ) -> impl Responder {
-    let session_id = match query.get("session_id") {
-        Some(id) => id.clone(),
-        None => {
-            return HttpResponse::Ok()
-                .content_type("text/event-stream")
-                .body("data: {\"error\": \"Missing session_id\"}\n\n");
-        }
-    };
+    let session_id = query.get("session_id").cloned().unwrap_or_default();
+    if session_id.is_empty() {
+        return HttpResponse::Ok()
+            .content_type("text/event-stream")
+            .body("data: {\"error\": \"Missing session_id\"}\n\n");
+    }
     
     let token_store_clone = token_store.clone();
     let session_id_clone = session_id.clone();
@@ -312,7 +320,6 @@ pub async fn oauth_callback(
     let code = code.unwrap();
     let session_id = session_id.unwrap();
     
-    // Exchange code for tokens
     let client = reqwest::Client::new();
     let params = [
         ("code", code.as_str()),
@@ -337,7 +344,14 @@ pub async fn oauth_callback(
                         if let Some(refresh_token) = &token_data.refresh_token {
                             token_store.store_token(session_id.clone(), refresh_token.clone());
                             
+                            let cookie = Cookie::build("session_id", session_id.clone())
+                                .path("/")
+                                .same_site(SameSite::Lax)
+                                .http_only(false)
+                                .finish();
+                            
                             HttpResponse::Ok()
+                                .insert_header(("Set-Cookie", cookie.to_string()))
                                 .content_type("text/html; charset=utf-8")
                                 .body(r#"
                                     <html>
@@ -351,10 +365,16 @@ pub async fn oauth_callback(
                                     </html>
                                 "#)
                         } else {
-                            // Store access token if no refresh token
                             token_store.store_token(session_id.clone(), token_data.access_token.clone());
                             
+                            let cookie = Cookie::build("session_id", session_id.clone())
+                                .path("/")
+                                .same_site(SameSite::Lax)
+                                .http_only(false)
+                                .finish();
+                            
                             HttpResponse::Ok()
+                                .insert_header(("Set-Cookie", cookie.to_string()))
                                 .content_type("text/html; charset=utf-8")
                                 .body(r#"
                                     <html>
@@ -441,7 +461,6 @@ pub async fn account_info(
     
     let refresh_token = refresh_token.unwrap();
     
-    // Get access token from refresh token
     let client = reqwest::Client::new();
     let params = [
         ("client_id", data.client_id.as_str()),
@@ -487,7 +506,6 @@ pub async fn account_info(
         }
     };
     
-    // Get user info
     let user_info_res = client
         .get("https://www.googleapis.com/oauth2/v2/userinfo")
         .header("Authorization", format!("Bearer {}", access_token))
@@ -525,7 +543,6 @@ pub async fn account_info(
         }
     };
     
-    // Get YouTube channel info
     let youtube_res = client
         .get("https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics&mine=true")
         .header("Authorization", format!("Bearer {}", access_token))

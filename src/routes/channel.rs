@@ -5,6 +5,16 @@ use std::collections::HashMap;
 use utoipa::ToSchema;
 use urlencoding;
 
+fn base_url(req: &HttpRequest, config: &crate::config::Config) -> String {
+    if !config.server.mainurl.is_empty() {
+        return config.server.mainurl.clone();
+    }
+    let info = req.connection_info();
+    let scheme = info.scheme();
+    let host = info.host();
+    format!("{}://{}/", scheme, host.trim_end_matches('/'))
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct ChannelInfo {
     pub title: String,
@@ -62,7 +72,8 @@ async fn fetch_channel_videos(
     channel_id: &str,
     count: i32,
     apikey: &str,
-    config: &crate::config::Config,
+    _config: &crate::config::Config,
+    base: &str,
 ) -> (Vec<ChannelVideo>, ChannelInfo) {
     let client = Client::new();
     
@@ -90,7 +101,7 @@ async fn fetch_channel_videos(
         .unwrap_or("Unknown")
         .to_string();
     
-    let channel_thumb = fetch_channel_thumbnail(channel_id, apikey)
+    let _channel_thumb = fetch_channel_thumbnail(channel_id, apikey)
         .await
         .unwrap_or_default();
     
@@ -124,9 +135,9 @@ async fn fetch_channel_videos(
             .and_then(|d| d.as_str())
             .unwrap_or("")
             .to_string(),
-        thumbnail: format!("{}channel_icon/{}", config.server.mainurl.trim_end_matches('/'), channel_id),
+        thumbnail: format!("{}/channel_icon/{}", base.trim_end_matches('/'), channel_id),
         banner: if !banner.is_empty() {
-            format!("{}channel_icon/{}", config.server.mainurl.trim_end_matches('/'), banner)
+            format!("{}/channel_icon/{}", base.trim_end_matches('/'), banner)
         } else {
             "".to_string()
         },
@@ -171,7 +182,6 @@ async fn fetch_channel_videos(
             }
         }
         
-        // Fetch stats in batch
         let mut view_counts: HashMap<String, String> = HashMap::new();
         if !video_ids.is_empty() {
             let ids = video_ids.join(",");
@@ -222,14 +232,14 @@ async fn fetch_channel_videos(
                         .unwrap_or("")
                         .to_string();
                     
-                    let thumbnail = format!("{}/thumbnail/{}", config.server.mainurl.trim_end_matches('/'), video_id);
+                    let thumbnail = format!("{}/thumbnail/{}", base.trim_end_matches('/'), video_id);
                     
                     videos.push(ChannelVideo {
                         title,
                         author: channel_title.clone(),
                         video_id: video_id.to_string(),
                         thumbnail,
-                        channel_thumbnail: channel_thumb.clone(),
+                        channel_thumbnail: format!("{}/channel_icon/{}", base.trim_end_matches('/'), channel_id),
                         views: view_counts.get(video_id).cloned().unwrap_or_else(|| "0".to_string()),
                         published_at,
                     });
@@ -268,6 +278,7 @@ pub async fn get_author_videos(
     data: web::Data<crate::AppState>,
 ) -> impl Responder {
     let config = &data.config;
+    let base = base_url(&req, config);
     let mut query_params: HashMap<String, String> = HashMap::new();
     for pair in req.query_string().split('&') {
         let mut parts = pair.split('=');
@@ -325,7 +336,7 @@ pub async fn get_author_videos(
         }
     };
     
-    get_author_videos_by_id_internal(&channel_id, count, config).await
+    get_author_videos_by_id_internal(&channel_id, count, config, &base).await
 }
 
 #[utoipa::path(
@@ -345,6 +356,7 @@ pub async fn get_author_videos_by_id(
     data: web::Data<crate::AppState>,
 ) -> impl Responder {
     let config = &data.config;
+    let base = base_url(&req, config);
     let mut query_params: HashMap<String, String> = HashMap::new();
     for pair in req.query_string().split('&') {
         let mut parts = pair.split('=');
@@ -366,16 +378,17 @@ pub async fn get_author_videos_by_id(
         .and_then(|c| c.parse().ok())
         .unwrap_or(config.video.default_count as i32);
     
-    get_author_videos_by_id_internal(&channel_id, count, config).await
+    get_author_videos_by_id_internal(&channel_id, count, config, &base).await
 }
 
 async fn get_author_videos_by_id_internal(
     channel_id: &str,
     count: i32,
     config: &crate::config::Config,
+    base: &str,
 ) -> HttpResponse {
     let apikey = config.get_api_key_rotated();
-    let (videos, channel_info) = fetch_channel_videos(channel_id, count, apikey, config).await;
+    let (videos, channel_info) = fetch_channel_videos(channel_id, count, apikey, config, base).await;
     
     let response = ChannelVideosResponse {
         channel_info,

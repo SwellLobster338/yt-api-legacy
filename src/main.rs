@@ -1,5 +1,6 @@
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use actix_files as fs;
+use actix_web::middleware::{NormalizePath, TrailingSlash};
 use serde::{Deserialize, Serialize};
 use std::fs as stdfs;
 use utoipa::OpenApi;
@@ -62,7 +63,6 @@ use routes::auth::{AuthConfig, TokenStore};
             routes::auth_routes::OAuth2UserInfoResponse,
             routes::search::TopVideo,
             routes::search::SearchResult,
-            routes::search::SearchSuggestions,
             routes::search::CategoryItem,
             routes::search::PlaylistInfo,
             routes::search::PlaylistVideo,
@@ -77,7 +77,6 @@ use routes::auth::{AuthConfig, TokenStore};
             routes::additional::RecommendationItem,
             routes::additional::HistoryItem,
             routes::additional::SubscriptionsResponse,
-            routes::additional::HistoryResponse,
             routes::additional::InstantsResponse,
             routes::additional::InstantItem,
         )
@@ -134,11 +133,25 @@ async fn main() -> std::io::Result<()> {
     
     let config = Config::from_file("config.yml")
         .expect("Failed to load config.yml");
+
+    let redirect_base = if let Some(custom) = config.api.redirect_uri.clone() {
+        custom.trim_end_matches('/').to_string()
+    } else if !config.server.mainurl.is_empty() {
+        config.server.mainurl.trim_end_matches('/').to_string()
+    } else if let Some(first) = config.instants.first() {
+        first.url.trim_end_matches('/').to_string()
+    } else {
+        format!("http://localhost:{}", config.server.port)
+    };
     
     let auth_config = AuthConfig {
         client_id: config.api.oauth_client_id.clone(),
         client_secret: config.api.oauth_client_secret.clone(),
-        redirect_uri: format!("http://localhost:{}/oauth/callback", config.server.port),
+        redirect_uri: if config.api.redirect_uri.is_some() {
+            redirect_base.clone()
+        } else {
+            format!("{}/oauth/callback", redirect_base)
+        },
         scopes: vec![
             "https://www.googleapis.com/auth/youtube.readonly".to_string(),
             "https://www.googleapis.com/auth/youtube".to_string(),
@@ -162,6 +175,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(app_state.clone())
             .app_data(auth_config_data.clone())
             .app_data(token_store_data.clone())
+            .wrap(NormalizePath::new(TrailingSlash::MergeOnly))
             .wrap(log::SelectiveLogger::default())
             .service(fs::Files::new("/assets", "assets/").show_files_listing())
             .service(

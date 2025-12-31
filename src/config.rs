@@ -7,6 +7,7 @@ use utoipa::ToSchema;
 pub struct ServerConfig {
     #[serde(default = "default_port")]
     pub port: u16,
+    #[serde(default = "default_mainurl")]
     pub mainurl: String,
     pub secretkey: String,
     pub frontend_url: String,
@@ -18,6 +19,8 @@ pub struct ApiConfig {
     pub oauth_client_id: String,
     pub oauth_client_secret: String,
     pub request_timeout: u64,
+    #[serde(default)]
+    pub redirect_uri: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, ToSchema)]
@@ -66,6 +69,10 @@ static API_KEY_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 fn default_port() -> u16 {
     2823
+}
+
+fn default_mainurl() -> String {
+    String::new()
 }
 
 fn default_count() -> u32 {

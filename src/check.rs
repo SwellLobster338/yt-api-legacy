@@ -17,9 +17,8 @@ fn check_and_generate_config() {
         
         let default_config = r#"server:
   port: 2823
-  mainurl: "http://localhost:2823/"
+  mainurl: ""
   secretkey: "YOUR_SECRET_KEY"
-  frontend_url: "http://localhost:3000"
 
 api:
   api_keys:
@@ -52,7 +51,9 @@ proxy:
 
 cache:
   temp_folder_max_size_mb: 5120
-  cache_cleanup_threshold_mb: 100"#;
+  cache_cleanup_threshold_mb: 100
+
+instants: []"#;
         
         if let Err(e) = fs::write("config.yml", default_config) {
             log::error!("Failed to create default config.yml: {}", e);
@@ -85,7 +86,7 @@ async fn check_and_download_yt_dlp() {
     let mut input = String::new();
     io::stdin().read_line(&mut input).expect("Failed to read input");
     
-    if input.trim().to_lowercase() == "y" || input.trim().to_lowercase() == "yes" {
+    if input.trim().to_lowercase() == "y" || input.trim().to_lowercase() == "yes" || input.trim().eq_ignore_ascii_case("д") || input.trim().eq_ignore_ascii_case("да") {
         log::info!("Downloading latest yt-dlp...");
         
         match download_yt_dlp().await {
@@ -110,18 +111,18 @@ async fn download_yt_dlp() -> Result<(), Box<dyn std::error::Error>> {
         fs::create_dir("assets")?;
     }
     
-    let binary_name = if cfg!(target_os = "windows") {
-        "yt-dlp.exe"
-    } else {
-        "yt-dlp"
-    };
-    
     let client = reqwest::Client::new();
     
-    let url = if cfg!(target_os = "windows") {
-        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+    let (url, binary_name) = if cfg!(target_os = "windows") {
+        (
+            "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe",
+            "yt-dlp.exe",
+        )
     } else {
-        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
+        (
+            "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux",
+            "yt-dlp",
+        )
     };
     
     let response = client.get(url).send().await?;

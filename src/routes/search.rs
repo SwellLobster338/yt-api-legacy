@@ -3,6 +3,17 @@ use serde::Serialize;
 use utoipa::ToSchema;
 use reqwest::Client;
 use std::collections::HashMap;
+use serde_json;
+
+fn base_url(req: &HttpRequest, config: &crate::config::Config) -> String {
+    if !config.server.mainurl.is_empty() {
+        return config.server.mainurl.clone();
+    }
+    let info = req.connection_info();
+    let scheme = info.scheme();
+    let host = info.host();
+    format!("{}://{}/", scheme, host.trim_end_matches('/'))
+}
 
 #[derive(Serialize, ToSchema)]
 pub struct TopVideo {
@@ -25,12 +36,6 @@ pub struct SearchResult {
     pub playlist_id: Option<String>,
     pub thumbnail: String,
     pub channel_thumbnail: String,
-}
-
-#[derive(Serialize, ToSchema)]
-pub struct SearchSuggestions {
-    pub query: String,
-    pub suggestions: Vec<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -67,9 +72,8 @@ pub struct PlaylistResponse {
 }
 
 async fn get_channel_thumbnail(channel_id: &str, api_key: &str, config: &crate::config::Config) -> String {
-    // Если отключено прямое получение, возвращаем локальный прокси, чтобы иконки всегда были доступны.
     if !config.proxy.fetch_channel_thumbnails {
-        return format!("{}/channel_icon/{}", config.server.mainurl.trim_end_matches('/'), channel_id);
+        return "https://yt3.googleusercontent.com/a/default-user=s88-c-k-c0x00ffffff-no-rj".to_string();
     }
     
     let client = Client::new();
@@ -94,15 +98,15 @@ async fn get_channel_thumbnail(channel_id: &str, api_key: &str, config: &crate::
                             }
                         }
                     }
-                    format!("{}/channel_icon/{}", config.server.mainurl.trim_end_matches('/'), channel_id)
+                    "https://yt3.googleusercontent.com/a/default-user=s88-c-k-c0x00ffffff-no-rj".to_string()
                 }
                 Err(_) => {
-                    format!("{}/channel_icon/{}", config.server.mainurl.trim_end_matches('/'), channel_id)
+                    "https://yt3.googleusercontent.com/a/default-user=s88-c-k-c0x00ffffff-no-rj".to_string()
                 }
             }
         }
         Err(_) => {
-            format!("{}/channel_icon/{}", config.server.mainurl.trim_end_matches('/'), channel_id)
+            "https://yt3.googleusercontent.com/a/default-user=s88-c-k-c0x00ffffff-no-rj".to_string()
         }
     }
 }
@@ -123,6 +127,7 @@ pub async fn get_top_videos(
     data: web::Data<crate::AppState>,
 ) -> impl Responder {
     let config = &data.config;
+    let base = base_url(&req, config);
     
     let count: i32 = req.query_string()
         .split('&')
@@ -174,9 +179,9 @@ pub async fn get_top_videos(
                                     .unwrap_or("Unknown Author")
                                     .to_string();
                                 
-                                let thumbnail = format!("{}/thumbnail/{}", config.server.mainurl.trim_end_matches('/'), video_id);
+                                let thumbnail = format!("{}/thumbnail/{}", base.trim_end_matches('/'), video_id);
                                 
-                                let channel_thumbnail = format!("{}/channel_icon/{}", config.server.mainurl.trim_end_matches('/'), channel_id);
+                                let channel_thumbnail = format!("{}/channel_icon/{}", base.trim_end_matches('/'), channel_id);
                                 
                                 top_videos.push(TopVideo {
                                     title,
@@ -227,6 +232,7 @@ pub async fn get_search_videos(
     data: web::Data<crate::AppState>,
 ) -> impl Responder {
     let config = &data.config;
+    let base = base_url(&req, config);
     
     let mut query_params: HashMap<String, String> = HashMap::new();
     for pair in req.query_string().split('&') {
@@ -311,11 +317,11 @@ pub async fn get_search_videos(
                                             continue;
                                         }
                                         
-                                        let thumbnail = format!("{}/thumbnail/{}", config.server.mainurl.trim_end_matches('/'), video_id.as_ref().unwrap());
+                                        let thumbnail = format!("{}/thumbnail/{}", base.trim_end_matches('/'), video_id.as_ref().unwrap());
                                         let channel_thumbnail = channel_id
                                             .as_ref()
-                                            .map(|c| format!("{}/channel_icon/{}", config.server.mainurl.trim_end_matches('/'), c))
-                                            .unwrap_or_else(|| format!("{}/channel_icon/{}", config.server.mainurl.trim_end_matches('/'), video_id.as_ref().unwrap()));
+                                            .map(|c| format!("{}/channel_icon/{}", base.trim_end_matches('/'), c))
+                                            .unwrap_or_else(|| format!("{}/channel_icon/{}", base.trim_end_matches('/'), video_id.as_ref().unwrap()));
                                         
                                         SearchResult {
                                             title,
@@ -343,7 +349,7 @@ pub async fn get_search_videos(
                                             .unwrap_or("")
                                             .to_string();
                                         
-                                        let channel_thumbnail = format!("{}/channel_icon/{}", config.server.mainurl.trim_end_matches('/'), channel_id.as_ref().unwrap());
+                                        let channel_thumbnail = format!("{}/channel_icon/{}", base.trim_end_matches('/'), channel_id.as_ref().unwrap());
                                         
                                         SearchResult {
                                             title,
@@ -380,7 +386,7 @@ pub async fn get_search_videos(
                                         }
                                         
                                         let thumbnail = if !video_id.is_empty() {
-                                            format!("{}/thumbnail/{}", config.server.mainurl.trim_end_matches('/'), video_id)
+                                            format!("{}/thumbnail/{}", base.trim_end_matches('/'), video_id)
                                         } else {
                                             item_info.get("thumbnails")
                                                 .and_then(|thumbs| thumbs.get("high"))
@@ -392,7 +398,7 @@ pub async fn get_search_videos(
                                         
                                         let channel_thumbnail = channel_id
                                             .as_ref()
-                                            .map(|c| format!("{}/channel_icon/{}", config.server.mainurl.trim_end_matches('/'), c))
+                                            .map(|c| format!("{}/channel_icon/{}", base.trim_end_matches('/'), c))
                                             .unwrap_or_default();
                                         
                                         SearchResult {
@@ -493,32 +499,16 @@ pub async fn get_search_suggestions(
                     
                     match serde_json::from_str::<serde_json::Value>(&data) {
                         Ok(json_data) => {
-                            let suggestions: Vec<String> = json_data
+                            let suggestions: Vec<serde_json::Value> = json_data
                                 .get(1)
                                 .and_then(|v| v.as_array())
-                                .map(|arr| {
-                                    arr.iter()
-                                        .take(10)
-                                        .filter_map(|item| {
-                                            if let Some(suggestion_arr) = item.as_array() {
-                                                suggestion_arr
-                                                    .get(0)
-                                                    .and_then(|v| v.as_str())
-                                                    .map(|s| s.to_string())
-                                            } else {
-                                                item.as_str().map(|s| s.to_string())
-                                            }
-                                        })
-                                        .collect()
-                                })
+                                .map(|arr| arr.iter().take(10).cloned().collect())
                                 .unwrap_or_default();
                             
-                            let result = SearchSuggestions {
-                                query: query.clone(),
-                                suggestions,
-                            };
-                            
-                            HttpResponse::Ok().json(result)
+                            HttpResponse::Ok().json(serde_json::json!({
+                                "query": query.clone(),
+                                "suggestions": suggestions
+                            }))
                         }
                         Err(e) => {
                             crate::log::info!("Error parsing suggestions JSON: {} - Data: {}", e, data);
@@ -642,6 +632,7 @@ pub async fn get_categories_videos(
     data: web::Data<crate::AppState>,
 ) -> impl Responder {
     let config = &data.config;
+    let base = base_url(&req, config);
     let mut query_params: HashMap<String, String> = HashMap::new();
     for pair in req.query_string().split('&') {
         let mut parts = pair.split('=');
@@ -690,13 +681,13 @@ pub async fn get_categories_videos(
                                     .unwrap_or("Unknown Author")
                                     .to_string();
                                 
-                                let thumbnail = format!("{}/thumbnail/{}", config.server.mainurl.trim_end_matches('/'), video_id);
+                                let thumbnail = format!("{}/thumbnail/{}", base.trim_end_matches('/'), video_id);
                                 
                                 let channel_thumbnail = video_info
                                     .get("channelId")
                                     .and_then(|c| c.as_str())
-                                    .map(|c| format!("{}/channel_icon/{}", config.server.mainurl.trim_end_matches('/'), c))
-                                    .unwrap_or_else(|| format!("{}/channel_icon/{}", config.server.mainurl.trim_end_matches('/'), video_id));
+                                    .map(|c| format!("{}/channel_icon/{}", base.trim_end_matches('/'), c))
+                                    .unwrap_or_else(|| format!("{}/channel_icon/{}", base.trim_end_matches('/'), video_id));
                                 
                                 top_videos.push(TopVideo {
                                     title,
@@ -759,6 +750,7 @@ pub async fn get_playlist_videos(
     req: HttpRequest,
     data: web::Data<crate::AppState>,
 ) -> impl Responder {
+    let base = base_url(&req, &data.config);
     let playlist_id = path.into_inner();
     if playlist_id.is_empty() {
         return HttpResponse::BadRequest().json(serde_json::json!({
@@ -894,7 +886,7 @@ pub async fn get_playlist_videos(
                             .unwrap_or_else(|| snippet.get("channelTitle").and_then(|t| t.as_str()).unwrap_or(""))
                             .to_string();
                         
-                        let thumbnail = format!("{}/thumbnail/{}", config.server.mainurl.trim_end_matches('/'), video_id);
+                        let thumbnail = format!("{}/thumbnail/{}", base.trim_end_matches('/'), video_id);
                         
                         let channel_thumbnail = channel_info
                             .and_then(|c| c.get("snippet"))
@@ -903,7 +895,7 @@ pub async fn get_playlist_videos(
                             .and_then(|h| h.get("url"))
                             .and_then(|u| u.as_str())
                             .map(|u| u.to_string())
-                            .unwrap_or_else(|| format!("{}/channel_icon/{}", config.server.mainurl.trim_end_matches('/'), channel_id));
+                            .unwrap_or_else(|| format!("{}/channel_icon/{}", base.trim_end_matches('/'), channel_id));
                         
                         videos.push(PlaylistVideo {
                             title,
@@ -947,7 +939,7 @@ pub async fn get_playlist_videos(
             .unwrap_or("")
             .to_string(),
         thumbnail: if !first_video_id.is_empty() {
-            format!("{}/thumbnail/{}", config.server.mainurl.trim_end_matches('/'), first_video_id)
+            format!("{}/thumbnail/{}", base.trim_end_matches('/'), first_video_id)
         } else {
             "".to_string()
         },
