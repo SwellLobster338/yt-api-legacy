@@ -577,7 +577,10 @@ pub async fn get_ytvideo_info(
         }
     };
     
-    let _quality = query_params.get("quality").map(|s| s.as_str()).unwrap_or(&config.video.default_quality);
+    let quality = query_params
+        .get("quality")
+        .map(|s| s.as_str())
+        .unwrap_or(&config.video.default_quality);
     let proxy_param = query_params.get("proxy").map(|s| s.to_lowercase()).unwrap_or("true".to_string());
     let _use_video_proxy = proxy_param != "false";
     
@@ -676,7 +679,7 @@ pub async fn get_ytvideo_info(
                     
 
                     let final_video_url = if config.video.video_source == "direct" {
-                        format!("{}direct_url?video_id={}", config.server.mainurl, video_id)
+                        format!("{}direct_url?video_id={}&quality={}", config.server.mainurl, video_id, quality)
                     } else {
                         "".to_string()
                     };
@@ -853,6 +856,11 @@ pub async fn get_related_videos(
             }));
         }
     };
+
+    let quality = query_params
+        .get("quality")
+        .map(|q| q.clone())
+        .unwrap_or_else(|| config.video.default_quality.clone());
     
     // Handle count parameter (backward compatibility)
     let count_param: i32 = query_params.get("count")
@@ -970,7 +978,7 @@ pub async fn get_related_videos(
                                                                 let channel_thumbnail = format!("{}channel_icon/{}", config.server.mainurl.trim_end_matches('/'), if channel_id.is_empty() { vid } else { channel_id.as_str() });
                                                                 
                                                                 let video_url = format!("{}get-ytvideo-info.php?video_id={}&quality={}", 
-                                                                    config.server.mainurl, vid, config.video.default_quality);
+                                                                    config.server.mainurl, vid, quality);
                                                                 
                                                                 let final_url = if config.proxy.use_video_proxy {
                                                                     format!("{}video.proxy?url={}", config.server.mainurl, urlencoding::encode(&video_url))
