@@ -745,10 +745,8 @@ pub async fn get_ytvideo_info(
                                                 }
                                                 let author_thumbnail = if thumb.is_empty() {
                                                     "https://yt3.googleusercontent.com/a/default-user=s88-c-k-c0x00ffffff-no-rj".to_string()
-                                                } else if config.proxy.use_channel_thumbnail_proxy {
-                                                    format!("{}/channel_icon/{}", base_trimmed, urlencoding::encode(&thumb))
                                                 } else {
-                                                    thumb
+                                                    format!("{}/channel_icon/{}", base_trimmed, urlencoding::encode(&thumb))
                                                 };
                                                 
                                                 comments.push(Comment {
