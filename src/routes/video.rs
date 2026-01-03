@@ -468,13 +468,18 @@ pub async fn channel_icon(
     let path_video_id = path.into_inner();
     let config = &data.config;
 
-    if path_video_id.starts_with("http") {
+    // Декодируем URL если он закодирован
+    let decoded_path = urlencoding::decode(&path_video_id)
+        .map(|s| s.to_string())
+        .unwrap_or(path_video_id.clone());
+
+    if decoded_path.starts_with("http://") || decoded_path.starts_with("https://") {
         let client = Client::builder()
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
             .build()
             .unwrap();
 
-        match client.get(&path_video_id).send().await {
+        match client.get(&decoded_path).send().await {
             Ok(image_resp) => {
                 let headers = image_resp.headers().clone();
                 let content_type = headers

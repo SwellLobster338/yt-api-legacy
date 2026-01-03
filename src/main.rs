@@ -156,6 +156,12 @@ async fn main() -> std::io::Result<()> {
         format!("http://localhost:{}", config.server.port)
     };
 
+    let youtube_api_key = if !config.api.api_keys.is_empty() {
+        config.api.api_keys[0].clone()
+    } else {
+        String::new()
+    };
+    
     let auth_config = AuthConfig {
         client_id: config.api.oauth_client_id.clone(),
         client_secret: config.api.oauth_client_secret.clone(),
@@ -170,6 +176,7 @@ async fn main() -> std::io::Result<()> {
             "https://www.googleapis.com/auth/userinfo.profile".to_string(),
             "https://www.googleapis.com/auth/userinfo.email".to_string(),
         ],
+        youtube_api_key,
     };
 
     let auth_config_data = web::Data::new(auth_config);
