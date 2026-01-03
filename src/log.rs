@@ -1,13 +1,13 @@
-use std::io::Write;
-use std::task::{Context, Poll};
-use chrono::Local;
-use colored::*;
 use actix_web::{
     dev::{Service, ServiceRequest, ServiceResponse, Transform},
     Error,
 };
+use chrono::Local;
+use colored::*;
 use futures_util::future::LocalBoxFuture;
 use std::future::{ready, Ready};
+use std::io::Write;
+use std::task::{Context, Poll};
 
 pub fn init_logger() {
     std::env::set_var("RUST_LOG", "info");
@@ -20,12 +20,9 @@ pub fn init_logger() {
         .init();
 }
 
-fn format_log(
-    buf: &mut env_logger::fmt::Formatter,
-    record: &log::Record,
-) -> std::io::Result<()> {
+fn format_log(buf: &mut env_logger::fmt::Formatter, record: &log::Record) -> std::io::Result<()> {
     let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    
+
     let level_str = match record.level() {
         log::Level::Error => "[ERROR]".red(),
         log::Level::Warn => "[WARN]".yellow(),
@@ -33,7 +30,7 @@ fn format_log(
         log::Level::Debug => "[DEBUG]".blue(),
         log::Level::Trace => "[TRACE]".purple(),
     };
-    
+
     writeln!(
         buf,
         "{} {} {}",
@@ -85,19 +82,20 @@ where
 
     fn call(&self, req: ServiceRequest) -> Self::Future {
         let fut = self.service.call(req);
-        
+
         Box::pin(async move {
             let res = fut.await?;
             let status = res.status();
-            
+
             if status.as_u16() != 200 {
-                info!("{} {} - {}", 
-                    status.as_u16(), 
+                info!(
+                    "{} {} - {}",
+                    status.as_u16(),
                     status.canonical_reason().unwrap_or("Unknown"),
                     res.request().path()
                 );
             }
-            
+
             Ok(res)
         })
     }

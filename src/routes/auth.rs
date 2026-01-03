@@ -1,14 +1,14 @@
-use actix_web::{web, HttpResponse, Responder, HttpRequest};
-use serde::{Serialize, Deserialize};
-use utoipa::ToSchema;
+use actix_web::cookie::{Cookie, SameSite};
+use actix_web::{web, HttpRequest, HttpResponse, Responder};
+use base64::{engine::general_purpose, Engine as _};
+use image::{DynamicImage, Rgb, RgbImage};
+use qrcode::QrCode;
+use reqwest;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use qrcode::QrCode;
+use utoipa::ToSchema;
 use uuid::Uuid;
-use image::{DynamicImage, Rgb, RgbImage};
-use base64::{Engine as _, engine::general_purpose};
-use reqwest;
-use actix_web::cookie::{Cookie, SameSite};
 
 pub struct TokenStore {
     tokens: Arc<Mutex<HashMap<String, String>>>,
@@ -149,7 +149,7 @@ pub fn get_auth_url(config: &AuthConfig, session_id: &str) -> String {
     let scope = config.scopes.join(" ");
     let encoded_scope = urlencoding::encode(&scope);
     let redirect_uri = urlencoding::encode(&config.redirect_uri);
-    
+
     format!(
         "https://accounts.google.com/o/oauth2/auth?\
         client_id={}&\
@@ -159,22 +159,19 @@ pub fn get_auth_url(config: &AuthConfig, session_id: &str) -> String {
         access_type=offline&\
         prompt=consent&\
         state={}",
-        config.client_id,
-        redirect_uri,
-        encoded_scope,
-        session_id
+        config.client_id, redirect_uri, encoded_scope, session_id
     )
 }
 
 fn generate_qr_code(auth_url: &str) -> String {
     let code = QrCode::new(auth_url.as_bytes()).unwrap();
-    
+
     let size = code.width();
-    
+
     let scale = 10;
     let image_size = size * scale;
     let mut img = RgbImage::new(image_size as u32, image_size as u32);
-    
+
     for y in 0..size {
         for x in 0..size {
             let color = if matches!(code[(x, y)], qrcode::Color::Dark) {
@@ -182,7 +179,7 @@ fn generate_qr_code(auth_url: &str) -> String {
             } else {
                 Rgb([255, 255, 255])
             };
-            
+
             for dy in 0..scale {
                 for dx in 0..scale {
                     let px = (x * scale + dx) as u32;
@@ -192,12 +189,14 @@ fn generate_qr_code(auth_url: &str) -> String {
             }
         }
     }
-    
+
     let image = DynamicImage::ImageRgb8(img);
-    
+
     let mut buffer = std::io::Cursor::new(Vec::new());
-    image.write_to(&mut buffer, image::ImageFormat::Png).unwrap();
-    
+    image
+        .write_to(&mut buffer, image::ImageFormat::Png)
+        .unwrap();
+
     general_purpose::STANDARD.encode(&buffer.into_inner())
 }
 
@@ -213,42 +212,45 @@ pub async fn auth_handler(
     data: web::Data<AuthConfig>,
     token_store: web::Data<TokenStore>,
 ) -> impl Responder {
-    let session_id = req.cookie("session_id")
+    let session_id = req
+        .cookie("session_id")
         .map(|c| c.value().to_string())
         .unwrap_or_else(|| Uuid::new_v4().to_string());
-    
-    let refresh_token = req.headers().get("refresh_token")
+
+    let refresh_token = req
+        .headers()
+        .get("refresh_token")
         .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string())
         .unwrap_or_default();
-    
+
     if !refresh_token.is_empty() {
         let token_display = format!("Token: {}", html_escape::encode_text(&refresh_token));
         return HttpResponse::Ok()
             .content_type("text/html; charset=utf-8")
             .body(format!("<ytreq>{}</ytreq>", token_display));
     }
-    
+
     if let Some(token) = token_store.get_token(&session_id) {
         if !token.starts_with("Error") {
             token_store.remove_token(&session_id);
-            
+
             let token_display = format!("Token: {}", html_escape::encode_text(&token));
             return HttpResponse::Ok()
                 .content_type("text/html; charset=utf-8")
                 .body(format!("<ytreq>{}</ytreq>", token_display));
         }
     }
-    
+
     let auth_url = get_auth_url(&data, &session_id);
     let qr_base64 = generate_qr_code(&auth_url);
-    
+
     let cookie = Cookie::build("session_id", session_id.clone())
         .path("/")
         .same_site(SameSite::Lax)
         .http_only(false)
         .finish();
-    
+
     HttpResponse::Ok()
         .insert_header(("Set-Cookie", cookie.to_string()))
         .content_type("text/html; charset=utf-8")
@@ -272,10 +274,10 @@ pub async fn auth_events(
             .content_type("text/event-stream")
             .body("data: {\"error\": \"Missing session_id\"}\n\n");
     }
-    
+
     let token_store_clone = token_store.clone();
     let session_id_clone = session_id.clone();
-    
+
     if let Some(token) = token_store_clone.get_token(&session_id_clone) {
         let response = serde_json::json!({"token": token});
         token_store_clone.remove_token(&session_id_clone);
@@ -303,23 +305,25 @@ pub async fn oauth_callback(
 ) -> impl Responder {
     let code = query.get("code");
     let session_id = query.get("state");
-    
+
     if code.is_none() || session_id.is_none() {
         return HttpResponse::BadRequest()
             .content_type("text/html; charset=utf-8")
-            .body(r#"
+            .body(
+                r#"
                 <html>
                     <body>
                         <h2>Authentication failed</h2>
                         <p>No authorization code or state received.</p>
                     </body>
                 </html>
-            "#);
+            "#,
+            );
     }
-    
+
     let code = code.unwrap();
     let session_id = session_id.unwrap();
-    
+
     let client = reqwest::Client::new();
     let params = [
         ("code", code.as_str()),
@@ -328,13 +332,13 @@ pub async fn oauth_callback(
         ("redirect_uri", data.redirect_uri.as_str()),
         ("grant_type", "authorization_code"),
     ];
-    
+
     let res = client
         .post("https://oauth2.googleapis.com/token")
         .form(&params)
         .send()
         .await;
-    
+
     match res {
         Ok(response) => {
             if response.status().is_success() {
@@ -343,13 +347,13 @@ pub async fn oauth_callback(
                     Ok(token_data) => {
                         if let Some(refresh_token) = &token_data.refresh_token {
                             token_store.store_token(session_id.clone(), refresh_token.clone());
-                            
+
                             let cookie = Cookie::build("session_id", session_id.clone())
                                 .path("/")
                                 .same_site(SameSite::Lax)
                                 .http_only(false)
                                 .finish();
-                            
+
                             HttpResponse::Ok()
                                 .insert_header(("Set-Cookie", cookie.to_string()))
                                 .content_type("text/html; charset=utf-8")
@@ -365,14 +369,15 @@ pub async fn oauth_callback(
                                     </html>
                                 "#)
                         } else {
-                            token_store.store_token(session_id.clone(), token_data.access_token.clone());
-                            
+                            token_store
+                                .store_token(session_id.clone(), token_data.access_token.clone());
+
                             let cookie = Cookie::build("session_id", session_id.clone())
                                 .path("/")
                                 .same_site(SameSite::Lax)
                                 .http_only(false)
                                 .finish();
-                            
+
                             HttpResponse::Ok()
                                 .insert_header(("Set-Cookie", cookie.to_string()))
                                 .content_type("text/html; charset=utf-8")
@@ -390,45 +395,55 @@ pub async fn oauth_callback(
                         }
                     }
                     Err(_) => {
-                        token_store.store_token(session_id.clone(), "Error: Failed to parse token response".to_string());
+                        token_store.store_token(
+                            session_id.clone(),
+                            "Error: Failed to parse token response".to_string(),
+                        );
                         HttpResponse::BadRequest()
                             .content_type("text/html; charset=utf-8")
-                            .body(r#"
+                            .body(
+                                r#"
                                 <html>
                                     <body>
                                         <h2>Error</h2>
                                         <p>Error parsing token response.</p>
                                     </body>
                                 </html>
-                            "#)
+                            "#,
+                            )
                     }
                 }
             } else {
-                token_store.store_token(session_id.clone(), "Error: Failed to get token".to_string());
+                token_store
+                    .store_token(session_id.clone(), "Error: Failed to get token".to_string());
                 HttpResponse::BadRequest()
                     .content_type("text/html; charset=utf-8")
-                    .body(r#"
+                    .body(
+                        r#"
                         <html>
                             <body>
                                 <h2>Error</h2>
                                 <p>Failed to get token from Google.</p>
                             </body>
                         </html>
-                    "#)
+                    "#,
+                    )
             }
         }
         Err(_) => {
             token_store.store_token(session_id.clone(), "Error: Network error".to_string());
             HttpResponse::BadRequest()
                 .content_type("text/html; charset=utf-8")
-                .body(r#"
+                .body(
+                    r#"
                     <html>
                         <body>
                             <h2>Error</h2>
                             <p>Network error occurred while getting token.</p>
                         </body>
                     </html>
-                "#)
+                "#,
+                )
         }
     }
 }
@@ -451,16 +466,15 @@ pub async fn account_info(
     data: web::Data<AuthConfig>,
 ) -> impl Responder {
     let refresh_token = query.get("token");
-    
+
     if refresh_token.is_none() {
-        return HttpResponse::BadRequest()
-            .json(serde_json::json!({
-                "error": "Missing token parameter. Use ?token=YOUR_REFRESH_TOKEN"
-            }));
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Missing token parameter. Use ?token=YOUR_REFRESH_TOKEN"
+        }));
     }
-    
+
     let refresh_token = refresh_token.unwrap();
-    
+
     let client = reqwest::Client::new();
     let params = [
         ("client_id", data.client_id.as_str()),
@@ -468,13 +482,13 @@ pub async fn account_info(
         ("refresh_token", refresh_token),
         ("grant_type", "refresh_token"),
     ];
-    
+
     let res = client
         .post("https://oauth2.googleapis.com/token")
         .form(&params)
         .send()
         .await;
-    
+
     let access_token = match res {
         Ok(response) => {
             if response.status().is_success() {
@@ -482,36 +496,33 @@ pub async fn account_info(
                 match token_response {
                     Ok(token_data) => token_data.access_token,
                     Err(_) => {
-                        return HttpResponse::Unauthorized()
-                            .json(serde_json::json!({
-                                "error": "Invalid refresh token",
-                                "details": "Failed to parse token response"
-                            }));
+                        return HttpResponse::Unauthorized().json(serde_json::json!({
+                            "error": "Invalid refresh token",
+                            "details": "Failed to parse token response"
+                        }));
                     }
                 }
             } else {
-                return HttpResponse::Unauthorized()
-                    .json(serde_json::json!({
-                        "error": "Invalid refresh token",
-                        "details": "Failed to refresh token"
-                    }));
+                return HttpResponse::Unauthorized().json(serde_json::json!({
+                    "error": "Invalid refresh token",
+                    "details": "Failed to refresh token"
+                }));
             }
         }
         Err(_) => {
-            return HttpResponse::InternalServerError()
-                .json(serde_json::json!({
-                    "error": "Failed to get account information",
-                    "details": "Network error occurred while refreshing token"
-                }));
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to get account information",
+                "details": "Network error occurred while refreshing token"
+            }));
         }
     };
-    
+
     let user_info_res = client
         .get("https://www.googleapis.com/oauth2/v2/userinfo")
         .header("Authorization", format!("Bearer {}", access_token))
         .send()
         .await;
-    
+
     let user_info = match user_info_res {
         Ok(response) => {
             if response.status().is_success() {
@@ -519,36 +530,33 @@ pub async fn account_info(
                 match user_info_response {
                     Ok(info) => info,
                     Err(_) => {
-                        return HttpResponse::InternalServerError()
-                            .json(serde_json::json!({
-                                "error": "Failed to get account information",
-                                "details": "Failed to parse user info response"
-                            }));
+                        return HttpResponse::InternalServerError().json(serde_json::json!({
+                            "error": "Failed to get account information",
+                            "details": "Failed to parse user info response"
+                        }));
                     }
                 }
             } else {
-                return HttpResponse::InternalServerError()
-                    .json(serde_json::json!({
-                        "error": "Failed to get account information",
-                        "details": "Failed to get user info"
-                    }));
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": "Failed to get account information",
+                    "details": "Failed to get user info"
+                }));
             }
         }
         Err(_) => {
-            return HttpResponse::InternalServerError()
-                .json(serde_json::json!({
-                    "error": "Failed to get account information",
-                    "details": "Network error occurred while getting user info"
-                }));
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to get account information",
+                "details": "Network error occurred while getting user info"
+            }));
         }
     };
-    
+
     let youtube_res = client
         .get("https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics&mine=true")
         .header("Authorization", format!("Bearer {}", access_token))
         .send()
         .await;
-    
+
     let youtube_channel = match youtube_res {
         Ok(response) => {
             if response.status().is_success() {
@@ -560,18 +568,28 @@ pub async fn account_info(
                                 let channel_item = &items[0];
                                 let snippet = &channel_item.snippet;
                                 let statistics = &channel_item.statistics;
-                                
+
                                 Some(YouTubeChannel {
                                     id: Some(channel_item.id.clone()),
                                     title: snippet.as_ref().and_then(|s| s.title.clone()),
-                                    description: snippet.as_ref().and_then(|s| s.description.clone()),
+                                    description: snippet
+                                        .as_ref()
+                                        .and_then(|s| s.description.clone()),
                                     custom_url: snippet.as_ref().and_then(|s| s.customUrl.clone()),
-                                    published_at: snippet.as_ref().and_then(|s| s.publishedAt.clone()),
+                                    published_at: snippet
+                                        .as_ref()
+                                        .and_then(|s| s.publishedAt.clone()),
                                     thumbnails: snippet.as_ref().and_then(|s| s.thumbnails.clone()),
                                     country: snippet.as_ref().and_then(|s| s.country.clone()),
-                                    subscriber_count: statistics.as_ref().and_then(|s| s.subscriberCount.clone()),
-                                    video_count: statistics.as_ref().and_then(|s| s.videoCount.clone()),
-                                    view_count: statistics.as_ref().and_then(|s| s.viewCount.clone()),
+                                    subscriber_count: statistics
+                                        .as_ref()
+                                        .and_then(|s| s.subscriberCount.clone()),
+                                    video_count: statistics
+                                        .as_ref()
+                                        .and_then(|s| s.videoCount.clone()),
+                                    view_count: statistics
+                                        .as_ref()
+                                        .and_then(|s| s.viewCount.clone()),
                                 })
                             } else {
                                 None
@@ -580,15 +598,15 @@ pub async fn account_info(
                             None
                         }
                     }
-                    Err(_) => None
+                    Err(_) => None,
                 }
             } else {
                 None
             }
         }
-        Err(_) => None
+        Err(_) => None,
     };
-    
+
     let response = AccountInfoResponse {
         google_account: GoogleAccount {
             id: Some(user_info.id),
@@ -602,6 +620,6 @@ pub async fn account_info(
         },
         youtube_channel,
     };
-    
+
     HttpResponse::Ok().json(response)
 }

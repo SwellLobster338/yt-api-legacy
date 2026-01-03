@@ -7,7 +7,9 @@ server:
 api:
   api_keys:
     - "add api keys here which you like to use"
+  dontworkedkeys: []
   oauth_client_id: "" # google oauth client id - go to https://console.developers.google.com/apis/credentials
+  innertube_key: ""
   oauth_client_secret: "" # google oauth client secret - go to https://console.developers.google.com/apis/credentials
   request_timeout: 30
 

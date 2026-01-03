@@ -1,10 +1,10 @@
 use actix_web::{web, HttpResponse, Responder};
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
+use utoipa::ToSchema;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct YouTubeSession {
@@ -55,7 +55,7 @@ fn save_sessions(sessions: &Vec<YouTubeSession>) -> Result<(), std::io::Error> {
     if let Some(parent) = Path::new(TOKENS_FILE_PATH).parent() {
         fs::create_dir_all(parent)?;
     }
-    
+
     let json = serde_json::to_string_pretty(sessions)?;
     let mut file = File::create(TOKENS_FILE_PATH)?;
     file.write_all(json.as_bytes())?;
@@ -69,12 +69,15 @@ fn is_username_taken(username: &str) -> bool {
 
 fn is_username_password_correct(username: &str, password: &str) -> bool {
     let sessions = load_sessions();
-    sessions.iter().any(|s| s.username == username && s.password == password)
+    sessions
+        .iter()
+        .any(|s| s.username == username && s.password == password)
 }
 
 fn get_valid_login_data(username: &str, password: &str) -> Option<(String, String)> {
     let sessions = load_sessions();
-    sessions.iter()
+    sessions
+        .iter()
         .find(|s| s.username == username && s.password == password && s.is_linked)
         .map(|s| (s.device_id.clone(), s.access_token.clone()))
 }
@@ -115,9 +118,7 @@ pub async fn check_if_username_is_taken(
         (status = 400, description = "Bad request")
     )
 )]
-pub async fn link_device_token(
-    body: web::Bytes,
-) -> impl Responder {
+pub async fn link_device_token(body: web::Bytes) -> impl Responder {
     let json_str = match std::str::from_utf8(&body) {
         Ok(s) => s,
         Err(_) => {
@@ -144,10 +145,26 @@ pub async fn link_device_token(
         }
     };
 
-    let username = data.get("username").and_then(|u| u.as_str()).unwrap_or("").to_string();
-    let password = data.get("password").and_then(|p| p.as_str()).unwrap_or("").to_string();
-    let access_token = data.get("access_token").and_then(|a| a.as_str()).unwrap_or("").to_string();
-    let refresh_token = data.get("refresh_token").and_then(|r| r.as_str()).unwrap_or("").to_string();
+    let username = data
+        .get("username")
+        .and_then(|u| u.as_str())
+        .unwrap_or("")
+        .to_string();
+    let password = data
+        .get("password")
+        .and_then(|p| p.as_str())
+        .unwrap_or("")
+        .to_string();
+    let access_token = data
+        .get("access_token")
+        .and_then(|a| a.as_str())
+        .unwrap_or("")
+        .to_string();
+    let refresh_token = data
+        .get("refresh_token")
+        .and_then(|r| r.as_str())
+        .unwrap_or("")
+        .to_string();
 
     let mut sessions = load_sessions();
 
@@ -194,9 +211,7 @@ pub async fn link_device_token(
         (status = 500, description = "Internal server error")
     )
 )]
-pub async fn get_session(
-    body: web::Bytes,
-) -> impl Responder {
+pub async fn get_session(body: web::Bytes) -> impl Responder {
     let form_str = match std::str::from_utf8(&body) {
         Ok(s) => s,
         Err(_) => {
@@ -209,7 +224,9 @@ pub async fn get_session(
         let mut parts = pair.split('=');
         if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
             let decoded_key = urlencoding::decode(key).unwrap_or(key.into()).to_string();
-            let decoded_value = urlencoding::decode(value).unwrap_or(value.into()).to_string();
+            let decoded_value = urlencoding::decode(value)
+                .unwrap_or(value.into())
+                .to_string();
             form_data.insert(decoded_key, decoded_value);
         }
     }
@@ -248,9 +265,7 @@ pub async fn get_session(
         (status = 200, description = "Client login response")
     )
 )]
-pub async fn client_login(
-    body: web::Bytes,
-) -> impl Responder {
+pub async fn client_login(body: web::Bytes) -> impl Responder {
     let form_str = match std::str::from_utf8(&body) {
         Ok(s) => s,
         Err(_) => {
@@ -263,7 +278,9 @@ pub async fn client_login(
         let mut parts = pair.split('=');
         if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
             let decoded_key = urlencoding::decode(key).unwrap_or(key.into()).to_string();
-            let decoded_value = urlencoding::decode(value).unwrap_or(value.into()).to_string();
+            let decoded_value = urlencoding::decode(value)
+                .unwrap_or(value.into())
+                .to_string();
             form_data.insert(decoded_key, decoded_value);
         }
     }
@@ -276,15 +293,20 @@ pub async fn client_login(
     }
 
     if !is_username_password_correct(&username, &password) {
-        return HttpResponse::Ok().body("Your username and password are wrong, or your account isn't linked!!!");
+        return HttpResponse::Ok()
+            .body("Your username and password are wrong, or your account isn't linked!!!");
     }
 
     match get_valid_login_data(&username, &password) {
         Some((device_id, _)) => {
-            let response = format!("SID={}\nLSID={}\nAuth={}\n", device_id, device_id, device_id);
+            let response = format!(
+                "SID={}\nLSID={}\nAuth={}\n",
+                device_id, device_id, device_id
+            );
             HttpResponse::Ok().content_type("text/plain").body(response)
-        },
-        None => HttpResponse::Ok().body("Your username and password are wrong, or your account isn't linked!!!"),
+        }
+        None => HttpResponse::Ok()
+            .body("Your username and password are wrong, or your account isn't linked!!!"),
     }
 }
 
@@ -295,9 +317,7 @@ pub async fn client_login(
         (status = 200, description = "Client login response")
     )
 )]
-pub async fn youtube_client_login(
-    body: web::Bytes,
-) -> impl Responder {
+pub async fn youtube_client_login(body: web::Bytes) -> impl Responder {
     client_login(body).await
 }
 
@@ -309,9 +329,7 @@ pub async fn youtube_client_login(
         (status = 200, description = "OAuth token response", body = OAuth2TokenResponse)
     )
 )]
-pub async fn oauth2_token(
-    body: web::Bytes,
-) -> impl Responder {
+pub async fn oauth2_token(body: web::Bytes) -> impl Responder {
     let form_str = match std::str::from_utf8(&body) {
         Ok(s) => s,
         Err(_) => {
@@ -324,15 +342,19 @@ pub async fn oauth2_token(
         let mut parts = pair.split('=');
         if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
             let decoded_key = urlencoding::decode(key).unwrap_or(key.into()).to_string();
-            let decoded_value = urlencoding::decode(value).unwrap_or(value.into()).to_string();
+            let decoded_value = urlencoding::decode(value)
+                .unwrap_or(value.into())
+                .to_string();
             form_data.insert(decoded_key, decoded_value);
         }
     }
 
     let code = form_data.get("code").cloned();
     let refresh_token = form_data.get("refresh_token").cloned();
-    
-    let access_token = code.or(refresh_token).unwrap_or_else(|| "lifeisstrange".to_string());
+
+    let access_token = code
+        .or(refresh_token)
+        .unwrap_or_else(|| "lifeisstrange".to_string());
 
     let response = OAuth2TokenResponse {
         access_token: access_token.clone(),

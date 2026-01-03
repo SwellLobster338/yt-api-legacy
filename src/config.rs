@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use utoipa::ToSchema;
@@ -16,6 +17,10 @@ pub struct ServerConfig {
 #[derive(Debug, Deserialize, Serialize, Clone, ToSchema)]
 pub struct ApiConfig {
     pub api_keys: Vec<String>,
+    #[serde(default)]
+    pub dontworkedkeys: Vec<String>,
+    #[serde(default)]
+    pub innertube_key: Option<String>,
     pub oauth_client_id: String,
     pub oauth_client_secret: String,
     pub request_timeout: u64,
@@ -93,13 +98,25 @@ impl Config {
         let config: Config = serde_yaml::from_str(&contents)?;
         Ok(config)
     }
-    
+
     pub fn get_api_key_rotated(&self) -> &str {
-        if self.api.api_keys.is_empty() {
-            return "";
-        }
-        
-        let index = API_KEY_COUNTER.fetch_add(1, Ordering::Relaxed) % self.api.api_keys.len();
-        &self.api.api_keys[index]
+        let bad: HashSet<&str> = self.api.dontworkedkeys.iter().map(|s| s.as_str()).collect();
+        let good_keys: Vec<&str> = self
+            .api
+            .api_keys
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|k| !k.is_empty() && !bad.contains(k))
+            .collect();
+        let index = API_KEY_COUNTER.fetch_add(1, Ordering::Relaxed) % good_keys.len();
+        good_keys[index]
+    }
+
+    pub fn get_innertube_key(&self) -> Option<&str> {
+        self.api
+            .innertube_key
+            .as_deref()
+            .map(|k| k.trim())
+            .filter(|k| !k.is_empty())
     }
 }

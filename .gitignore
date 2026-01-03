@@ -7,3 +7,6 @@ Cargo.lock
 assets/yt-dlp.exe
 assets/yt-dlp_linux
 assets/yt-dlp
+assets/cookies.txt
+assets/cookies/*
+.cargo/
