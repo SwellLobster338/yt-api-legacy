@@ -57,6 +57,7 @@ use routes::auth::{AuthConfig, TokenStore};
         routes::actions::rate,
         routes::actions::check_rating,
         routes::actions::check_subscription,
+        routes::additional::check_failed_api_keys,
     ),
     components(
         schemas(
@@ -331,6 +332,10 @@ async fn main() -> std::io::Result<()> {
             .route(
                 "/check_api_keys",
                 web::get().to(routes::additional::check_api_keys),
+            )
+            .route(
+                "/check_failed_api_keys",
+                web::get().to(routes::additional::check_failed_api_keys),
             )
             .route(
                 "/actions/subscribe",

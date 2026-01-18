@@ -53,6 +53,26 @@ fn generate_cpn() -> String {
     out
 }
 
+async fn is_key_valid(client: &Client, key: &str) -> bool {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let url = format!(
+        "https://www.googleapis.com/youtube/v3/videos?part=id&id=dQw4w9WgXcQ&key={}",
+        trimmed
+    );
+
+    matches!(client.get(&url).send().await, Ok(resp) if resp.status().is_success())
+}
+
+fn persist_config(path: &str, config: &Config) -> Result<(), String> {
+    serde_yaml::to_string(config)
+        .map_err(|e| format!("Failed to serialize config: {}", e))
+        .and_then(|yaml| fs::write(path, yaml).map_err(|e| format!("Failed to write config: {}", e)))
+}
+
 #[utoipa::path(
     get,
     path = "/check_api_keys",
@@ -80,51 +100,116 @@ pub async fn check_api_keys() -> impl Responder {
     }
 
     let client = Client::new();
-    let mut failed: HashSet<String> = HashSet::new();
+    let original_keys = config.api.api_keys.clone();
+    let mut working_keys: Vec<String> = Vec::with_capacity(original_keys.len());
+    let mut failed_keys: Vec<String> = Vec::new();
+    let mut failed_set: HashSet<String> = HashSet::new();
 
-    for key in &config.api.api_keys {
-        if key.trim().is_empty() {
-            failed.insert(key.clone());
+    for key in original_keys.iter() {
+        let normalized = key.trim().to_string();
+        if normalized.is_empty() {
+            if failed_set.insert(normalized.clone()) {
+                failed_keys.push(normalized);
+            }
             continue;
         }
-        let url = format!(
-            "https://www.googleapis.com/youtube/v3/videos?part=id&id=dQw4w9WgXcQ&key={}",
-            key
-        );
-        match client.get(&url).send().await {
-            Ok(resp) if resp.status().is_success() => {}
-            _ => {
-                failed.insert(key.clone());
-            }
+
+        if is_key_valid(&client, &normalized).await {
+            working_keys.push(normalized);
+        } else if failed_set.insert(normalized.clone()) {
+            failed_keys.push(normalized);
         }
     }
 
-    config.api.dontworkedkeys = failed.iter().cloned().collect();
-    let masked_failed: Vec<String> = config
-        .api
-        .dontworkedkeys
-        .iter()
-        .map(|k| mask_key(k))
-        .collect();
+    let checked = original_keys.len();
+    config.api.api_keys = working_keys;
 
-    match serde_yaml::to_string(&config) {
-        Ok(yaml) => {
-            if let Err(e) = fs::write(path, yaml) {
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("Failed to write config: {}", e)
-                }));
-            }
+    for failed in failed_keys.iter() {
+        if !config.api.dontworkedkeys.iter().any(|existing| existing == failed) {
+            config.api.dontworkedkeys.push(failed.clone());
         }
+    }
+
+    if let Err(e) = persist_config(path, &config) {
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": e
+        }));
+    }
+
+    let masked_failed: Vec<String> = failed_keys.iter().map(|k| mask_key(k)).collect();
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "checked": checked,
+        "failed": masked_failed,
+        "active": config.api.api_keys.len()
+    }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/check_failed_api_keys",
+    responses(
+        (status = 200, description = "Re-check non-working API keys")
+    )
+)]
+pub async fn check_failed_api_keys() -> impl Responder {
+    let path = "config.yml";
+    let mut config = match crate::config::Config::from_file(path) {
+        Ok(c) => c,
         Err(e) => {
             return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to serialize config: {}", e)
+                "error": format!("Failed to load config: {}", e)
             }));
         }
+    };
+
+    if config.api.dontworkedkeys.is_empty() {
+        return HttpResponse::Ok().json(serde_json::json!({
+            "checked": 0,
+            "message": "No non-working api_keys configured"
+        }));
+    }
+
+    let client = Client::new();
+    let mut revived_keys: Vec<String> = Vec::new();
+    let mut still_failed_keys: Vec<String> = Vec::new();
+
+    for key in config.api.dontworkedkeys.iter() {
+        let normalized = key.trim().to_string();
+
+        if normalized.is_empty() {
+            still_failed_keys.push(normalized);
+            continue;
+        }
+
+        if is_key_valid(&client, &normalized).await {
+            revived_keys.push(normalized);
+        } else {
+            still_failed_keys.push(normalized);
+        }
+    }
+
+    let mut active_keys = config.api.api_keys.clone();
+    for revived in revived_keys.iter() {
+        if !active_keys.iter().any(|existing| existing == revived) {
+            active_keys.push(revived.clone());
+        }
+    }
+
+    config.api.api_keys = active_keys;
+    config.api.dontworkedkeys = still_failed_keys.clone();
+
+    if let Err(e) = persist_config(path, &config) {
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": e
+        }));
     }
 
     HttpResponse::Ok().json(serde_json::json!({
-        "checked": config.api.api_keys.len(),
-        "failed": masked_failed,
+        "checked": revived_keys.len() + still_failed_keys.len(),
+        "revived": revived_keys.iter().map(|k| mask_key(k)).collect::<Vec<_>>(),
+        "still_failed": still_failed_keys.iter().map(|k| mask_key(k)).collect::<Vec<_>>(),
+        "active": config.api.api_keys.len()
     }))
 }
 
