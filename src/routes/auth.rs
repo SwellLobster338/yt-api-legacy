@@ -451,21 +451,25 @@ pub fn get_auth_url(config: &AuthConfig, session_id: &str) -> String {
     get,
     path = "/auth",
     params(
-        ("check" = Option<String>, Query, description = "Check authentication status")
+        ("check" = Option<String>, Query, description = "Check authentication status"),
+        ("type" = Option<String>, Query, description = "Type of authentication: 'pc' for user code, default is QR code")
     ),
     responses(
-        (status = 200, description = "QR code (base64) or refresh token", body = String)
+        (status = 200, description = "QR code (base64) or refresh token or user code", body = String)
     )
 )]
 pub async fn auth_handler(
     req: HttpRequest,
-    _query: web::Query<HashMap<String, String>>,
+    query: web::Query<HashMap<String, String>>,
     data: web::Data<AuthConfig>,
     token_store: web::Data<TokenStore>,
 ) -> impl Responder {
     let session_id = req.cookie("session_id")
         .map(|c| c.value().to_string())
         .unwrap_or_else(|| Uuid::new_v4().to_string());
+    
+    // Check if type=pc is specified to return user code instead of QR code
+    let is_pc_type = query.get("type").map_or(false, |t| t == "pc");
     
     // Если передан refresh_token в заголовке, отдаем его
     if let Some(refresh_token_header) = req.headers().get("refresh_token") {
@@ -522,10 +526,16 @@ pub async fn auth_handler(
                         .body(format!("<ytreq>{}</ytreq>", token_display));
                 } else if let Some(error) = token_response.error {
                     if error == "authorization_pending" {
-                        // Возвращаем сохраненный QR код, чтобы пользователь мог его увидеть
-                        return HttpResponse::Ok()
-                            .content_type("text/html; charset=utf-8")
-                            .body(format!("<ytreq>{}</ytreq>", device_flow.qr_base64));
+                        // Возвращаем сохраненный QR код или user code, в зависимости от типа
+                        if is_pc_type {
+                            return HttpResponse::Ok()
+                                .content_type("text/html; charset=utf-8")
+                                .body(format!("<ytreq>{}</ytreq>", device_flow.user_code));
+                        } else {
+                            return HttpResponse::Ok()
+                                .content_type("text/html; charset=utf-8")
+                                .body(format!("<ytreq>{}</ytreq>", device_flow.qr_base64));
+                        }
                     } else {
                         let error_msg = format!("❌ {}", error);
                         return HttpResponse::Ok()
@@ -533,10 +543,16 @@ pub async fn auth_handler(
                             .body(format!("<ytreq>{}</ytreq>", error_msg));
                     }
                 } else {
-                    // Нет ошибки, но и нет токена - возвращаем QR код
-                    return HttpResponse::Ok()
-                        .content_type("text/html; charset=utf-8")
-                        .body(format!("<ytreq>{}</ytreq>", device_flow.qr_base64));
+                    // Нет ошибки, но и нет токена - возвращаем QR код или user code в зависимости от типа
+                    if is_pc_type {
+                        return HttpResponse::Ok()
+                            .content_type("text/html; charset=utf-8")
+                            .body(format!("<ytreq>{}</ytreq>", device_flow.user_code));
+                    } else {
+                        return HttpResponse::Ok()
+                            .content_type("text/html; charset=utf-8")
+                            .body(format!("<ytreq>{}</ytreq>", device_flow.qr_base64));
+                    }
                 }
             }
             Err(e) => {
@@ -560,12 +576,14 @@ pub async fn auth_handler(
                     // Кодируем QR в base64
                     let qr_base64 = general_purpose::STANDARD.encode(&qr_bytes);
                     
+                    let user_code_clone = device_code_response.user_code.clone();
+                    
                     // Сохраняем device flow данные вместе с QR кодом
                     token_store.store_device_flow(
                         session_id.clone(),
                         DeviceFlowData {
                             device_code: device_code_response.device_code,
-                            user_code: device_code_response.user_code,
+                            user_code: user_code_clone.clone(),
                             qr_base64: qr_base64.clone(),
                         },
                     );
@@ -576,10 +594,17 @@ pub async fn auth_handler(
                         .http_only(false)
                         .finish();
                     
+                    // Return user code if type=pc, otherwise return QR code
+                    let response_content = if is_pc_type {
+                        user_code_clone
+                    } else {
+                        qr_base64.clone()
+                    };
+                    
                     HttpResponse::Ok()
                         .insert_header(("Set-Cookie", cookie.to_string()))
                         .content_type("text/html; charset=utf-8")
-                        .body(format!("<ytreq>{}</ytreq>", qr_base64))
+                        .body(format!("<ytreq>{}</ytreq>", response_content))
                 }
                 Err(e) => {
                     HttpResponse::InternalServerError()
