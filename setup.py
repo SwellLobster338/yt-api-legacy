@@ -163,6 +163,7 @@ def main():
             "https://yt.legacyprojects.ru",
             "https://yt.modyleprojects.ru",
             "https://ytcloud.meetlook.ru",
+            "https://yt.swlbst.ru",
         ],
     }
 
