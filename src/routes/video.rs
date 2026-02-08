@@ -2475,12 +2475,15 @@ async fn get_channel_avatar_url(
 }
 
 async fn proxy_image(url: &str) -> HttpResponse {
+    // Replace s900 with s88 in the URL for channel icons
+    let processed_url = url.replace("s900", "s88");
+    
     let client = Client::builder()
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
         .build()
         .unwrap();
 
-    match client.get(url).send().await {
+    match client.get(&processed_url).send().await {
         Ok(resp) if resp.status().is_success() => {
             let content_type = resp
                 .headers()
