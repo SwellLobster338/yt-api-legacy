@@ -27,6 +27,3 @@ You will need [Rust](https://rust-lang.org/tools/install/) installed on your sys
 3. Remove `.example` from the `config.yml.example` file. If you don't have this file, download it from the repository.
 4. Open `config.yml` and edit it to suit your needs.
 5. Run the binary and enjoy.
-
-## License
-This project is licensed under the MIT License - see the [LICENSE](./LICENSE) file for details.
