@@ -1,0 +1,60 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+
+    - name: Build
+      run: cargo build --release
+
+    - name: Prepare additional files
+      shell: bash
+      run: |
+        mkdir -p build-output
+        cp config.yml.example build-output/
+        cp -r assets build-output/
+        find build-output/assets -name "*.exe" -type f -delete
+
+    - name: Package artifact
+      shell: bash
+      run: |
+        if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+          mkdir -p temp-package
+          cp target/release/yt-api-legacy.exe temp-package/
+          cp -r build-output/* temp-package/
+          7z a yt-api-legacy-windows.zip temp-package/*
+        else
+          mkdir -p temp-package
+          cp target/release/yt-api-legacy temp-package/
+          cp -r build-output/* temp-package/
+          tar -czf yt-api-legacy-linux.tar.gz -C temp-package .
+        fi
+
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: yt-api-legacy-${{ matrix.os }}
+        path: |
+          yt-api-legacy-windows.zip
+          yt-api-legacy-linux.tar.gz
