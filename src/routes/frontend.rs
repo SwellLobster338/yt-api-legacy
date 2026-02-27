@@ -55,7 +55,7 @@ fn make_clickable(text: &str) -> String {
     let escaped = h(text);
     let with_br = escaped.replace("\n", "<br>");
     // Very simple URL detection
-    let url_regex = regex::Regex::new(r"https?://[^\s<>]+").unwrap();
+    let url_regex = regex::Regex::new(r"http?://[^\s<>]+").unwrap();
     url_regex
         .replace_all(&with_br, |caps: &regex::Captures| {
             let u = &caps[0];
