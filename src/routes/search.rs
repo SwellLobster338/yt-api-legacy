@@ -1,7 +1,7 @@
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use html_escape::decode_html_entities;
 use reqwest::Client;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json;
 use std::collections::HashMap;
 use urlencoding;
@@ -152,7 +152,7 @@ fn decode_label(value: &str) -> String {
         .filter(|c| !c.is_control())
         .collect()
 }
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct TopVideo {
     pub title: String,
     pub author: String,
@@ -162,7 +162,7 @@ pub struct TopVideo {
     pub duration: String,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct SearchResult {
     pub title: String,
     pub author: String,

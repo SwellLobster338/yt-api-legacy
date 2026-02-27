@@ -11,7 +11,7 @@ use image::{GenericImageView, Pixel};
 use lazy_static::lazy_static;
 use lru::LruCache;
 use reqwest::Client;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
@@ -349,9 +349,17 @@ fn find_subscriber_count(nd: &serde_json::Value) -> String {
                                 if let Some(owner) = video_secondary.get("owner") {
                                     if let Some(video_owner) = owner.get("videoOwnerRenderer") {
                                         if let Some(sub_text) = video_owner.get("subscriberCountText") {
-                                            if let Some(simple_text) = sub_text.get("simpleText").and_then(|t| t.as_str()) {
+                                            // Try simpleText first
+                                            let text = sub_text
+                                                .get("simpleText")
+                                                .and_then(|t| t.as_str())
+                                                .or_else(|| {
+                                                    // Fallback: runs[0].text (YouTube sometimes uses runs)
+                                                    sub_text.get("runs").and_then(|r| r.as_array()).and_then(|arr| arr.first()).and_then(|r| r.get("text").and_then(|t| t.as_str()))
+                                                });
+                                            if let Some(simple_text) = text {
                                                 // Extract numeric part and convert K/M abbreviations
-                                                let cleaned = simple_text.replace(" подписчиков", "").replace(" подписчик", "");
+                                                let cleaned = simple_text.replace(" подписчиков", "").replace(" подписчик", "").replace(" subscribers", "").replace(" subscriber", "");
                                                 
                                                 // Handle various formats including Russian abbreviations
                                                 // Russian: тыс (thousand), млн (million)
@@ -372,7 +380,11 @@ fn find_subscriber_count(nd: &serde_json::Value) -> String {
                                                         return result.to_string();
                                                     }
                                                 }
-                                                // If parsing fails, return the cleaned text
+                                                // If no multiplier matched, try digits only (e.g. "199")
+                                                let digits: String = cleaned.chars().filter(|c| c.is_ascii_digit()).collect();
+                                                if !digits.is_empty() {
+                                                    return digits;
+                                                }
                                                 return cleaned;
                                             }
                                         }
@@ -1145,7 +1157,7 @@ async fn proxy_stream_response(
     }
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct VideoInfoResponse {
     pub title: String,
     pub author: String,
@@ -1166,7 +1178,7 @@ pub struct VideoInfoResponse {
     pub video_url: String,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct Comment {
     pub author: String,
     pub text: String,
@@ -1175,7 +1187,7 @@ pub struct Comment {
     pub author_channel_url: Option<String>,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct RelatedVideo {
     pub title: String,
     pub author: String,

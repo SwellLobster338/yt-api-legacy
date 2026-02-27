@@ -1,6 +1,6 @@
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use reqwest::Client;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use urlencoding;
 use utoipa::ToSchema;
@@ -40,7 +40,7 @@ fn parse_number(text: &str) -> String {
     }
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct ChannelInfo {
     pub title: String,
     pub description: String,
@@ -50,7 +50,7 @@ pub struct ChannelInfo {
     pub video_count: String,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct ChannelVideo {
     pub title: String,
     pub author: String,
@@ -62,7 +62,7 @@ pub struct ChannelVideo {
     pub duration: String,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct ChannelVideosResponse {
     pub channel_info: ChannelInfo,
     pub videos: Vec<ChannelVideo>,
