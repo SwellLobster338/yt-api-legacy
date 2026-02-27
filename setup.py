@@ -133,6 +133,15 @@ def main():
             },
             "innertube": {
                 "key": fresh_key,
+                "user_agent": "com.google.ios.youtube/19.16.3 (iPhone16,2; U; CPU iOS 18_0 like Mac OS X)",
+                "client": {
+                    "client_name": "IOS",
+                    "client_version": "20.49.6",
+                    "device_make": "Apple",
+                    "device_model": "iPhone16,2",
+                    "os_name": "iOS",
+                    "os_version": "18.0",
+                },
             },
             "oauth": {
                 "client_id": "861556708454-d6dlm3lh05idd8npek18k6be8ba3oc68.apps.googleusercontent.com",

@@ -1,4 +1,4 @@
-﻿server:
+server:
   port: 2823
   # public URL of the server (optional)
   main_url: ""
@@ -13,6 +13,14 @@ api:
     disabled: []
   innertube:
     key: ""
+    user_agent: "com.google.ios.youtube/19.16.3 (iPhone16,2; U; CPU iOS 18_0 like Mac OS X)"
+    client:
+      client_name: "IOS"
+      client_version: "20.49.6"
+      device_make: "Apple"
+      device_model: "iPhone16,2"
+      os_name: "iOS"
+      os_version: "18.0"
   # google oauth - https://console.developers.google.com/apis/credentials
   oauth:
     client_id: ""
