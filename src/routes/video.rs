@@ -798,7 +798,7 @@ async fn resolve_video_audio_urls(
                     let vcodec = f.get("vcodec").and_then(|v| v.as_str()).unwrap_or("none");
                     let acodec = f.get("acodec").and_then(|v| v.as_str()).unwrap_or("none");
                     let protocol = f.get("protocol").and_then(|v| v.as_str()).unwrap_or("");
-                    if !protocol.starts_with("https") {
+                    if !protocol.starts_with("http") {
                         continue;
                     }
                     if vcodec != "none" && acodec == "none" {
