@@ -775,7 +775,7 @@ async fn resolve_video_audio_urls(
 
     for cookie in attempts {
         let cookie_for_dump = cookie.clone();
-        let url = format!("https://www.youtube.com/watch?v={}", video_id);
+        let url = format!("http://www.youtube.com/watch?v={}", video_id);
         let result = task::spawn_blocking({
             let yt_dlp = yt_dlp.clone();
             let url = url.clone();
@@ -897,7 +897,7 @@ fn stream_ffmpeg_merged_response(video_url: &str, audio_url: &str) -> HttpRespon
     let audio_url = audio_url.to_string();
     let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
     let user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0 Safari/537.36";
-    let headers_arg = "Referer: https://www.youtube.com\r\nOrigin: https://www.youtube.com";
+    let headers_arg = "Referer: http://www.youtube.com\r\nOrigin: http://www.youtube.com";
     std::thread::spawn(move || {
         // Конвертация в MP4 в реальном времени: два входа -> один выход -f mp4 (fragmented для стриминга)
         let mut child = match Command::new("ffmpeg")
@@ -1036,7 +1036,7 @@ async fn resolve_direct_stream_url(
     }
 
     task::spawn_blocking(move || {
-        let url = format!("https://www.youtube.com/watch?v={}", video_id);
+        let url = format!("http://www.youtube.com/watch?v={}", video_id);
         let format_selector = if audio_only {
             "bestaudio/best".to_string()
         } else {
@@ -1273,7 +1273,7 @@ pub async fn thumbnail_proxy(path: web::Path<String>, req: HttpRequest) -> impl 
         }
     }
 
-    let url = format!("https://i.ytimg.com/vi/{}/{}", video_id, thumbnail_type);
+    let url = format!("http://i.ytimg.com/vi/{}/{}", video_id, thumbnail_type);
 
     let client = Client::new();
 
@@ -1282,7 +1282,7 @@ pub async fn thumbnail_proxy(path: web::Path<String>, req: HttpRequest) -> impl 
             let status = resp.status().as_u16();
             let headers = resp.headers().clone();
             if status == 404 && thumbnail_type != "mqdefault.jpg" {
-                let fallback_url = format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", video_id);
+                let fallback_url = format!("http://i.ytimg.com/vi/{}/mqdefault.jpg", video_id);
                 match client.get(&fallback_url).send().await {
                     Ok(fallback_resp) => {
                         let fallback_headers = fallback_resp.headers().clone();
@@ -1370,7 +1370,7 @@ pub async fn channel_icon(
         .unwrap_or_else(|_| std::borrow::Cow::Owned(input.clone()))
         .to_string();
     
-    if decoded.starts_with("http://") || decoded.starts_with("https://") {
+    if decoded.starts_with("http://") || decoded.starts_with("http://") {
         return proxy_image(&decoded).await;
     }
 
@@ -1404,7 +1404,7 @@ pub async fn channel_icon(
     } else if input.starts_with('@') {
         // Получаем channelId из страницы канала
         let handle = &input[1..];
-        let page_url = format!("https://www.youtube.com/@{}", handle);
+        let page_url = format!("http://www.youtube.com/@{}", handle);
 
         if let Ok(resp) = client.get(&page_url).send().await {
             if let Ok(html) = resp.text().await {
@@ -1415,9 +1415,9 @@ pub async fn channel_icon(
                         channel_id = slice[..end].to_string();
                     }
                 }
-                // Альтернатива: ищем link rel="canonical" href="https://www.youtube.com/channel/UC...
+                // Альтернатива: ищем link rel="canonical" href="http://www.youtube.com/channel/UC...
                 if channel_id.is_empty() {
-                    if let Some(pos) = html.find(r#"<link rel="canonical" href="https://www.youtube.com/channel/"#) {
+                    if let Some(pos) = html.find(r#"<link rel="canonical" href="http://www.youtube.com/channel/"#) {
                         let slice = &html[pos + 47..]; // длина префикса
                         if let Some(end) = slice.find('"') {
                             channel_id = slice[..end].to_string();
@@ -1510,7 +1510,7 @@ pub async fn get_ytvideo_info(
     let client = Client::new();
     
     // Fetch initial player response (like in youtube_fetch.py)
-    let video_url = format!("https://www.youtube.com/watch?v={}", video_id);
+    let video_url = format!("http://www.youtube.com/watch?v={}", video_id);
     
     let html = match client.get(&video_url).send().await {
         Ok(resp) => match resp.text().await {
@@ -1555,7 +1555,7 @@ pub async fn get_ytvideo_info(
         "videoId": video_id
     });
     
-    let next_url = format!("https://www.youtube.com/youtubei/v1/next?key={}", api_key);
+    let next_url = format!("http://www.youtube.com/youtubei/v1/next?key={}", api_key);
     
     let next_data = match client
         .post(&next_url)
@@ -1780,7 +1780,7 @@ pub async fn get_ytvideo_info(
                 // Extract the @username part from URLs like "http://www.youtube.com/@TheAnimeSelect"
                 url_str.rsplit('/').next().map(|part| part.to_string())
             }),
-        embed_url: format!("https://www.youtube.com/embed/{}", video_id),
+        embed_url: format!("http://www.youtube.com/embed/{}", video_id),
         duration,
         published_at,
         likes: if !likes.is_empty() { Some(likes) } else { None },
@@ -1891,7 +1891,7 @@ pub async fn get_related_videos(
     });
 
     // Fetch initial HTML to get ytcfg
-    let watch_url = format!("https://www.youtube.com/watch?v={}", video_id);
+    let watch_url = format!("http://www.youtube.com/watch?v={}", video_id);
     let headers_map = {
         let mut map = reqwest::header::HeaderMap::new();
         map.insert(reqwest::header::USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/121.0.0.0 Safari/537.36".parse().unwrap());
@@ -1921,7 +1921,7 @@ pub async fn get_related_videos(
     let context_from_cfg = ytcfg.get("INNERTUBE_CONTEXT").cloned().unwrap_or(context);
 
     // Make first InnerTube request
-    let next_url = format!("https://www.youtube.com/youtubei/v1/next?key={}", api_key_from_cfg);
+    let next_url = format!("http://www.youtube.com/youtubei/v1/next?key={}", api_key_from_cfg);
     let body = serde_json::json!({
         "context": context_from_cfg,
         "videoId": video_id
@@ -2691,7 +2691,7 @@ async fn fetch_player_response(
         None => vec![HLS_PLAYER_API_KEY_FALLBACK],
     };
     for api_key in keys {
-        let url = format!("https://www.youtube.com/youtubei/v1/player?key={}", api_key);
+        let url = format!("http://www.youtube.com/youtubei/v1/player?key={}", api_key);
         let resp = client
             .post(&url)
             .header("User-Agent", &user_agent)
@@ -2853,7 +2853,7 @@ fn stream_hls_to_mp4_response(
     let video_url = video_playlist_url.to_string();
     let audio_url = audio_playlist_url.map(String::from);
     let user_agent = user_agent.to_string();
-    let headers_arg = "Referer: https://www.youtube.com/\r\nOrigin: https://www.youtube.com";
+    let headers_arg = "Referer: http://www.youtube.com/\r\nOrigin: http://www.youtube.com";
     let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
     std::thread::spawn(move || {
         let args: Vec<&str> = match &audio_url {
@@ -2949,7 +2949,7 @@ async fn get_channel_id_from_video(
     key: &str,
     ctx: &serde_json::Value,
 ) -> String {
-    let url = format!("https://www.youtube.com/youtubei/v1/player?key={}", key);
+    let url = format!("http://www.youtube.com/youtubei/v1/player?key={}", key);
 
     let payload = serde_json::json!({
         "context": ctx,
@@ -2983,7 +2983,7 @@ async fn get_channel_avatar_url(
     key: &str,
     ctx: &serde_json::Value,
 ) -> String {
-    let url = format!("https://www.youtube.com/youtubei/v1/browse?key={}", key);
+    let url = format!("http://www.youtube.com/youtubei/v1/browse?key={}", key);
 
     let payload = serde_json::json!({
         "context": ctx,
