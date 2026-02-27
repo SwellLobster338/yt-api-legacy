@@ -1,6 +1,11 @@
 use actix_web::http::header::{HeaderValue, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, LOCATION};
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
+use bytes::Bytes;
 use futures_util::StreamExt;
+use std::io::Read;
+use std::process::Stdio;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use html_escape::decode_html_entities;
 use image::{GenericImageView, Pixel};
 use lazy_static::lazy_static;
@@ -704,6 +709,290 @@ fn collect_cookie_paths() -> Vec<PathBuf> {
     paths
 }
 
+/// Parses quality string into resolution height (e.g. "720", "720p", "hd720" -> Some(720)).
+/// Used to decide when to use separate video+audio streams and ffmpeg merge.
+fn parse_quality_height(quality: &str) -> Option<u32> {
+    let s = quality.trim().to_lowercase();
+    let digits: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
+    if !digits.is_empty() {
+        if let Ok(h) = digits.parse::<u32>() {
+            return Some(h);
+        }
+    }
+    let aliases: std::collections::HashMap<&str, u32> = [
+        ("tiny", 144),
+        ("small", 240),
+        ("medium", 360),
+        ("large", 480),
+        ("hd", 720),
+        ("hd720", 720),
+        ("720p", 720),
+        ("hd1080", 1080),
+        ("1080p", 1080),
+        ("144p", 144),
+        ("240p", 240),
+        ("360p", 360),
+        ("480p", 480),
+        ("2160p", 2160),
+        ("1440p", 1440),
+    ]
+    .into_iter()
+    .collect();
+    aliases.get(s.as_str()).copied()
+}
+
+/// Returns (video_url, audio_url) for given resolution, using separate streams and cookies like ytapilegacy.
+async fn resolve_video_audio_urls(
+    video_id: &str,
+    height: u32,
+    config: &crate::config::Config,
+) -> Result<(String, String), String> {
+    let video_id = video_id.to_string();
+    let use_cookies = config.video.use_cookies;
+    let yt_dlp = yt_dlp_binary();
+    let mut cookie_paths = Vec::new();
+    if use_cookies {
+        cookie_paths = collect_cookie_paths();
+    }
+
+    let mut attempts: Vec<Option<PathBuf>> = Vec::new();
+    for p in &cookie_paths {
+        attempts.push(Some(p.clone()));
+    }
+    attempts.push(None);
+
+    for cookie in attempts {
+        let cookie_for_dump = cookie.clone();
+        let url = format!("https://www.youtube.com/watch?v={}", video_id);
+        let result = task::spawn_blocking({
+            let yt_dlp = yt_dlp.clone();
+            let url = url.clone();
+            move || {
+                let mut cmd = Command::new(&yt_dlp);
+                cmd.arg("--dump-json").arg(&url);
+                if let Some(ref path) = cookie_for_dump {
+                    cmd.arg("--cookies").arg(path);
+                }
+                let output = cmd.output().ok().filter(|o| o.status.success())?;
+                let info: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+                let formats = info.get("formats")?.as_array()?;
+                let mut video_candidates: Vec<(f64, String)> = Vec::new();
+                let mut video_fallback_candidates: Vec<(u32, f64, String)> = Vec::new();
+                let mut audio_format_id: Option<String> = None;
+                let mut best_audio_tbr = 0f64;
+                let mut best_audio_is_en = false;
+                for f in formats {
+                    let h = f.get("height").and_then(|v| v.as_u64()).map(|u| u as u32);
+                    let vcodec = f.get("vcodec").and_then(|v| v.as_str()).unwrap_or("none");
+                    let acodec = f.get("acodec").and_then(|v| v.as_str()).unwrap_or("none");
+                    let protocol = f.get("protocol").and_then(|v| v.as_str()).unwrap_or("");
+                    if !protocol.starts_with("https") {
+                        continue;
+                    }
+                    if vcodec != "none" && acodec == "none" {
+                        if let Some(hi) = h {
+                            if let Some(id) = f.get("format_id").and_then(|v| v.as_str()) {
+                                let tbr = f.get("tbr").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                if hi == height {
+                                    video_candidates.push((tbr, id.to_string()));
+                                } else if hi <= height {
+                                    video_fallback_candidates.push((hi, tbr, id.to_string()));
+                                }
+                            }
+                        }
+                    }
+                    if vcodec == "none" && acodec != "none" {
+                        let format_note = f.get("format").and_then(|v| v.as_str()).unwrap_or("");
+                        let is_en = format_note.contains("[en]");
+                        let tbr = f.get("tbr").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let id = f.get("format_id").and_then(|v| v.as_str()).map(String::from);
+                        if let Some(id) = id {
+                            let replace = audio_format_id.is_none()
+                                || is_en && !best_audio_is_en
+                                || (is_en == best_audio_is_en && tbr > best_audio_tbr);
+                            if replace {
+                                audio_format_id = Some(id);
+                                best_audio_tbr = tbr;
+                                best_audio_is_en = is_en;
+                            }
+                        }
+                    }
+                }
+                // best video by tbr при точном разрешении; иначе лучший с height <= запрошенного
+                let video_format_id = video_candidates
+                    .into_iter()
+                    .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(_, id)| id)
+                    .or_else(|| {
+                        video_fallback_candidates
+                            .into_iter()
+                            .max_by(|a, b| {
+                                a.0.cmp(&b.0).then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                            })
+                            .map(|(_, _, id)| id)
+                    });
+                let video_fid = video_format_id?;
+                let audio_id = audio_format_id?;
+                Some((video_fid, audio_id))
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+        let (video_fid, audio_fid) = match result {
+            Some(x) => x,
+            None => continue,
+        };
+
+        let cookie_for_get_url = cookie.clone();
+        let (video_url, audio_url) = task::spawn_blocking({
+            let yt_dlp = yt_dlp.clone();
+            let url = url.clone();
+            move || {
+                let mut cmd_v = Command::new(&yt_dlp);
+                cmd_v.arg("-f").arg(&video_fid).arg("--get-url").arg(&url);
+                if let Some(ref path) = cookie_for_get_url {
+                    cmd_v.arg("--cookies").arg(path);
+                }
+                let out_v = cmd_v.output().ok().filter(|o| o.status.success())?;
+                let url_v = String::from_utf8_lossy(&out_v.stdout);
+                let url_v = url_v.lines().find(|l| !l.trim().is_empty())?.trim().to_string();
+                let mut cmd_a = Command::new(&yt_dlp);
+                cmd_a.arg("-f").arg(&audio_fid).arg("--get-url").arg(&url);
+                if let Some(ref path) = cookie_for_get_url {
+                    cmd_a.arg("--cookies").arg(path);
+                }
+                let out_a = cmd_a.output().ok().filter(|o| o.status.success())?;
+                let url_a = String::from_utf8_lossy(&out_a.stdout);
+                let url_a = url_a.lines().find(|l| !l.trim().is_empty())?.trim().to_string();
+                Some((url_v, url_a))
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "yt-dlp failed to get video or audio URL".to_string())?;
+
+        return Ok((video_url, audio_url));
+    }
+
+    Err("Could not get separate video and audio URLs for any cookie attempt".to_string())
+}
+
+/// Объединяет видео и аудио потоки в MP4 в реальном времени через ffmpeg и отдаёт в ответ.
+fn stream_ffmpeg_merged_response(video_url: &str, audio_url: &str) -> HttpResponse {
+    const CHUNK: usize = 65536;
+    let video_url = video_url.to_string();
+    let audio_url = audio_url.to_string();
+    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0 Safari/537.36";
+    let headers_arg = "Referer: https://www.youtube.com\r\nOrigin: https://www.youtube.com";
+    std::thread::spawn(move || {
+        // Конвертация в MP4 в реальном времени: два входа -> один выход -f mp4 (fragmented для стриминга)
+        let mut child = match Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-reconnect",
+                "1",
+                "-reconnect_streamed",
+                "1",
+                "-reconnect_at_eof",
+                "1",
+                "-reconnect_delay_max",
+                "10",
+                "-user_agent",
+                user_agent,
+                "-headers",
+                headers_arg,
+                "-i",
+                &video_url,
+                "-user_agent",
+                user_agent,
+                "-headers",
+                headers_arg,
+                "-i",
+                &audio_url,
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "160k",
+                "-movflags",
+                "frag_keyframe+empty_moov+default_base_moof",
+                "-f",
+                "mp4",
+                "-",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tx.try_send(Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("ffmpeg spawn failed: {}", e),
+                )));
+                return;
+            }
+        };
+        if let Some(mut stderr) = child.stderr.take() {
+            std::thread::spawn(move || {
+                let mut line = String::new();
+                let mut buf = [0u8; 512];
+                while let Ok(n) = stderr.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    for &b in &buf[..n] {
+                        if b == b'\n' || b == b'\r' {
+                            if !line.is_empty() {
+                                line.clear();
+                            }
+                        } else {
+                            line.push(b as char);
+                        }
+                    }
+                }
+                if !line.is_empty() {}
+            });
+        }
+        let mut stdout = match child.stdout.take() {
+            Some(s) => s,
+            None => return,
+        };
+        let mut buf = [0u8; CHUNK];
+        loop {
+            match stdout.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx.blocking_send(Ok(Bytes::from(buf[..n].to_vec()))).is_err() {
+                        let _ = child.kill();
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.try_send(Err(e));
+                    let _ = child.kill();
+                    break;
+                }
+            }
+        }
+    });
+    let stream = ReceiverStream::new(rx).map(|r| r.map(web::Bytes::from).map_err(actix_web::error::ErrorInternalServerError));
+    HttpResponse::Ok()
+        .insert_header((CONTENT_TYPE, HeaderValue::from_static("video/mp4")))
+        .streaming(stream)
+}
+
 async fn resolve_direct_stream_url(
     video_id: &str,
     quality: Option<&str>,
@@ -1336,7 +1625,7 @@ pub async fn get_ytvideo_info(
     let mut views = String::new();
     let mut channel_id = String::new();
     let mut channel_thumbnail = String::new();
-    let duration = String::new();
+    let _duration = String::new();
     
     // Direct extraction from primary sources with minimal chaining
     if let Some(contents) = next_data.get("contents") {
@@ -1847,7 +2136,6 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
             }
         }
     } else {
-        // Original functionality - get direct stream URL with quality selection
         let quality = query_params.get("quality").map(|q| q.as_str());
         let proxy_param = query_params
             .get("proxy")
@@ -1855,14 +2143,55 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
             .unwrap_or_else(|| "true".to_string());
         let use_proxy = proxy_param != "false";
 
-        let direct_url = match resolve_direct_stream_url(&video_id, quality, false, &data.config).await
-        {
-            Ok(url) => url,
-            Err(e) => {
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": "Failed to resolve video url",
-                    "details": e
-                }));
+        let use_quality_hls = quality.and_then(|q| parse_quality_height(q)).is_some();
+        if use_quality_hls {
+            let height = quality.and_then(|q| parse_quality_height(q)).unwrap();
+            match get_hls_manifest_url(&video_id, &data.config).await {
+                Ok(master_url) => {
+                    let ua = data.config.get_innertube_user_agent();
+                    match fetch_hls_master_body(&master_url, &ua).await {
+                        Ok(master_body) => {
+                            let audio_groups = parse_hls_audio_groups(&master_body, &master_url);
+                            let variants = parse_hls_master_variants(&master_body, &master_url, &audio_groups);
+                            if let Some((video_url, audio_url)) = pick_hls_variant_for_height(&variants, height) {
+                                if req.method() == actix_web::http::Method::HEAD {
+                                    return HttpResponse::Ok()
+                                        .insert_header((CONTENT_TYPE, HeaderValue::from_static("video/mp4")))
+                                        .finish();
+                                }
+                                return stream_hls_to_mp4_response(
+                                    &video_url,
+                                    audio_url.as_deref(),
+                                    &data.config.get_innertube_user_agent(),
+                                );
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+
+        // Без параметра quality — прямая ссылка из player API (без yt-dlp); иначе yt-dlp
+        let direct_url = if quality.is_none() {
+            fetch_player_response(&video_id, &data.config)
+                .await
+                .ok()
+                .and_then(|data| get_direct_stream_url_from_player_response(&data))
+        } else {
+            None
+        };
+        let direct_url = match direct_url {
+            Some(url) => url,
+            None => match resolve_direct_stream_url(&video_id, quality, false, &data.config).await {
+                Ok(url) => url,
+                Err(e) => {
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": "Failed to resolve video url",
+                        "details": e
+                    }));
+                }
             }
         };
 
@@ -2329,55 +2658,277 @@ fn extract_video_from_lockup(lockup: &serde_json::Value) -> Option<RelatedVideoI
 // Вспомогательные функции
 // ────────────────────────────────────────────────
 
-// Get HLS manifest URL similar to the Python script
-async fn get_hls_manifest_url(video_id: &str, config: &crate::config::Config) -> Result<String, String> {
+const HLS_PLAYER_API_KEY_FALLBACK: &str = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
+
+/// Общий запрос к youtubei/v1/player (api key и user-agent из config).
+async fn fetch_player_response(
+    video_id: &str,
+    config: &crate::config::Config,
+) -> Result<Value, String> {
     let client = Client::new();
-    let api_key = config.get_api_key_rotated();
-    
-    let url = format!("https://www.youtube.com/youtubei/v1/player?key={}", api_key);
-    
+    let user_agent = config.get_innertube_user_agent();
+    let player_client = config.get_innertube_player_client();
     let json_data = serde_json::json!({
         "context": {
-            "client": {
-                "clientName": "IOS",
-                "clientVersion": "20.49.6",
-                "deviceMake": "Apple",
-                "deviceModel": "iPhone16,2",
-                "osName": "iOS",
-                "osVersion": "18.0"
-            }
+            "client": player_client.to_player_context_value()
         },
         "videoId": video_id
     });
+    let keys: Vec<&str> = match config.get_innertube_key() {
+        Some(k) => vec![k, HLS_PLAYER_API_KEY_FALLBACK],
+        None => vec![HLS_PLAYER_API_KEY_FALLBACK],
+    };
+    for api_key in keys {
+        let url = format!("https://www.youtube.com/youtubei/v1/player?key={}", api_key);
+        let resp = client
+            .post(&url)
+            .header("User-Agent", &user_agent)
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .header("Content-Type", "application/json")
+            .json(&json_data)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            continue;
+        }
+        let data = resp.json::<Value>().await.map_err(|e| e.to_string())?;
+        return Ok(data);
+    }
+    Err("player API failed for all keys".to_string())
+}
 
-    match client
-        .post(&url)
-        .json(&json_data)
-        .header("User-Agent", "com.google.ios.youtube/19.16.3 (iPhone16,2; U; CPU iOS 18_0 like Mac OS X)")
-        .header("Accept-Language", "en-US,en;q=0.9")
-        .header("Content-Type", "application/json")
-        .send()
-        .await
-    {
-        Ok(response) => {
-            if response.status().is_success() {
-                match response.json::<Value>().await {
-                    Ok(data) => {
-                        if let Some(streaming_data) = data.get("streamingData") {
-                            if let Some(hls_manifest_url) = streaming_data.get("hlsManifestUrl").and_then(|v| v.as_str()) {
-                                return Ok(hls_manifest_url.to_string());
-                            }
-                        }
-                        Err("Не удалось получить HLS манифест (возможно, видео приватное, возрастное ограничение или регионально заблокировано)".to_string())
-                    }
-                    Err(_) => Err("Failed to parse JSON response".to_string()),
-                }
-            } else {
-                Err(format!("API Error: {}", response.status()))
+/// Получает HLS Master Manifest URL из ответа player (streamingData.hlsManifestUrl).
+async fn get_hls_manifest_url(video_id: &str, config: &crate::config::Config) -> Result<String, String> {
+    let data = fetch_player_response(video_id, config).await?;
+    let streaming_data = data
+        .get("streamingData")
+        .ok_or("streamingData отсутствует")?;
+    let hls = streaming_data
+        .get("hlsManifestUrl")
+        .and_then(|v| v.as_str())
+        .ok_or("hlsManifestUrl отсутствует (приватное/возраст/регион)")?;
+    Ok(hls.to_string())
+}
+
+/// Прямая ссылка на стрим из player API (streamingData.formats или adaptiveFormats с полем url). Без yt-dlp.
+fn get_direct_stream_url_from_player_response(data: &Value) -> Option<String> {
+    let streaming = data.get("streamingData")?;
+    let mut best: Option<(u32, &str)> = None;
+    for key in &["formats", "adaptiveFormats"] {
+        let arr = streaming.get(*key)?.as_array()?;
+        for f in arr {
+            let url = f.get("url").and_then(|v| v.as_str())?;
+            let label = f.get("qualityLabel").and_then(|v| v.as_str()).unwrap_or("");
+            let height: u32 = label.trim_end_matches('p').parse().unwrap_or(0);
+            if *key == "adaptiveFormats" && height == 0 {
+                continue;
+            }
+            let replace = match best {
+                None => true,
+                Some((h, _)) => height > h,
+            };
+            if replace {
+                best = Some((height, url));
             }
         }
-        Err(e) => Err(format!("Request failed: {}", e)),
     }
+    best.map(|(_, u)| u.to_string())
+}
+
+/// Скачивает тело master manifest по URL (User-Agent из config).
+async fn fetch_hls_master_body(master_url: &str, user_agent: &str) -> Result<String, String> {
+    let client = Client::builder()
+        .user_agent(user_agent)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .get(master_url)
+        .header("Accept-Language", "en-US,en;q=0.9")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("Master manifest HTTP {}", resp.status()));
+    }
+    resp.text().await.map_err(|e| e.to_string())
+}
+
+/// Аудио-группа из master: GROUP-ID -> полный URL плейлиста (из одного запроса мастера).
+fn parse_hls_audio_groups(master_body: &str, master_base_url: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let re_group = regex::Regex::new(r#"GROUP-ID="([^"]+)""#).unwrap();
+    let re_uri = regex::Regex::new(r#"URI="([^"]+)""#).unwrap();
+    for line in master_body.lines().map(str::trim) {
+        if line.starts_with("#EXT-X-MEDIA:") && line.contains("TYPE=AUDIO") {
+            let group_id = re_group.captures(line).and_then(|c| c.get(1)).map(|m| m.as_str().to_string());
+            let uri = re_uri.captures(line).and_then(|c| c.get(1)).map(|m| m.as_str());
+            if let (Some(g), Some(u)) = (group_id, uri) {
+                let full = if u.starts_with("http") {
+                    u.to_string()
+                } else {
+                    let base = master_base_url.rsplit_once('/').map(|(b, _)| b).unwrap_or(master_base_url);
+                    format!("{}/{}", base, u)
+                };
+                if !map.contains_key(&g) {
+                    map.insert(g, full);
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Вариант из master: высота, URL видео-плейлиста, опционально URL аудио-плейлиста (из того же мастера).
+fn parse_hls_master_variants(
+    master_body: &str,
+    master_base_url: &str,
+    audio_groups: &HashMap<String, String>,
+) -> Vec<(u32, String, Option<String>)> {
+    let re_res = regex::Regex::new(r"RESOLUTION=(\d+)x(\d+)").unwrap();
+    let re_audio = regex::Regex::new(r#"AUDIO="([^"]+)""#).unwrap();
+    let mut variants = Vec::new();
+    let lines: Vec<&str> = master_body.lines().map(str::trim).collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        if line.starts_with("#EXT-X-STREAM-INF:") {
+            let height = re_res.captures(line).and_then(|c| c.get(2)).and_then(|m| m.as_str().parse::<u32>().ok());
+            let audio_group = re_audio.captures(line).and_then(|c| c.get(1)).map(|m| m.as_str());
+            i += 1;
+            if i < lines.len() {
+                let uri = lines[i].trim();
+                if !uri.is_empty() && !uri.starts_with('#') {
+                    let video_full = if uri.starts_with("http") {
+                        uri.to_string()
+                    } else {
+                        let base = master_base_url.rsplit_once('/').map(|(b, _)| b).unwrap_or(master_base_url);
+                        format!("{}/{}", base, uri)
+                    };
+                    let audio_url = audio_group.and_then(|g| audio_groups.get(g)).cloned();
+                    if let Some(h) = height {
+                        variants.push((h, video_full, audio_url));
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    variants
+}
+
+/// Выбирает вариант по высоте; возвращает (video_url, audio_url или None если уже в одном потоке).
+fn pick_hls_variant_for_height(
+    variants: &[(u32, String, Option<String>)],
+    requested_height: u32,
+) -> Option<(String, Option<String>)> {
+    let exact = variants.iter().find(|(h, _, _)| *h == requested_height);
+    let chosen = exact.or_else(|| {
+        variants
+            .iter()
+            .filter(|(h, _, _)| *h <= requested_height)
+            .max_by_key(|(h, _, _)| *h)
+    })?;
+    Some((chosen.1.clone(), chosen.2.clone()))
+}
+
+/// Стримит HLS в MP4 сразу; кэш во время воспроизведения (Cache-Control).
+fn stream_hls_to_mp4_response(
+    video_playlist_url: &str,
+    audio_playlist_url: Option<&str>,
+    user_agent: &str,
+) -> HttpResponse {
+    let video_url = video_playlist_url.to_string();
+    let audio_url = audio_playlist_url.map(String::from);
+    let user_agent = user_agent.to_string();
+    let headers_arg = "Referer: https://www.youtube.com/\r\nOrigin: https://www.youtube.com";
+    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    std::thread::spawn(move || {
+        let args: Vec<&str> = match &audio_url {
+            None => vec![
+                "-hide_banner", "-loglevel", "error", "-nostdin",
+                "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_at_eof", "1", "-reconnect_delay_max", "10",
+                "-user_agent", &user_agent, "-headers", headers_arg,
+                "-i", &video_url,
+                "-c", "copy",
+                "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+                "-f", "mp4", "-",
+            ],
+            Some(audio) => vec![
+                "-hide_banner", "-loglevel", "error", "-nostdin",
+                "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_at_eof", "1", "-reconnect_delay_max", "10",
+                "-user_agent", &user_agent, "-headers", headers_arg, "-i", &video_url,
+                "-user_agent", &user_agent, "-headers", headers_arg, "-i", audio,
+                "-map", "0:v:0", "-map", "1:a:0",
+                "-c:v", "copy", "-c:a", "copy",
+                "-bsf:a", "aac_adtstoasc",
+                "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+                "-f", "mp4", "-",
+            ],
+        };
+        let mut child = match Command::new("ffmpeg").args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tx.try_send(Err(std::io::Error::new(std::io::ErrorKind::Other, format!("ffmpeg spawn: {}", e))));
+                return;
+            }
+        };
+        if let Some(mut stderr) = child.stderr.take() {
+            std::thread::spawn(move || {
+                let mut line = String::new();
+                let mut buf = [0u8; 512];
+                while let Ok(n) = stderr.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    for &b in &buf[..n] {
+                        if b == b'\n' || b == b'\r' {
+                            if !line.is_empty() {
+                                line.clear();
+                            }
+                        } else {
+                            line.push(b as char);
+                        }
+                    }
+                }
+                if !line.is_empty() {
+                }
+            });
+        }
+        let mut stdout = match child.stdout.take() {
+            Some(s) => s,
+            None => return,
+        };
+        const CHUNK: usize = 65536;
+        let mut buf = [0u8; CHUNK];
+        loop {
+            match stdout.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx.blocking_send(Ok(Bytes::from(buf[..n].to_vec()))).is_err() {
+                        let _ = child.kill();
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.try_send(Err(e));
+                    let _ = child.kill();
+                    break;
+                }
+            }
+        }
+    });
+    let stream = ReceiverStream::new(rx)
+        .map(|r| r.map(web::Bytes::from).map_err(actix_web::error::ErrorInternalServerError));
+    HttpResponse::Ok()
+        .insert_header((CONTENT_TYPE, HeaderValue::from_static("video/mp4")))
+        .insert_header(("Cache-Control", "public, max-age=3600"))
+        .streaming(stream)
 }
 
 async fn get_channel_id_from_video(
