@@ -72,22 +72,20 @@ async fn download_mux_to_temp_file(
     height: u32,
 ) -> Result<PathBuf, String> {
     let temp_dir = env::temp_dir();
-    
-    // 1. Имя файла теперь содержит качество: yt_api_video_ID_1080p.mp4
+
     let final_file_name = format!("yt_api_video_{}_{}p.mp4", video_id, height);
     let final_path = temp_dir.join(&final_file_name);
-    
-    // Лок-файл тоже должен быть уникальным для качества
+
     let lock_file_name = format!("yt_api_video_{}_{}p.lock", video_id, height);
     let lock_path = temp_dir.join(&lock_file_name);
 
-    // Если видео уже скачано
+    // Already cached
     if final_path.exists() {
         log::info!("Video cached ({}p): {}. Serving.", height, final_file_name);
         return Ok(final_path);
     }
 
-    // --- Механизм блокировки (Locking) ---
+    // --- Locking ---
     let start_time = std::time::Instant::now();
     loop {
         if final_path.exists() {
@@ -97,79 +95,101 @@ async fn download_mux_to_temp_file(
 
         match std::fs::OpenOptions::new()
             .write(true)
-            .create_new(true) // Создаст файл только если его нет
-            .open(&lock_path) 
+            .create_new(true)
+            .open(&lock_path)
         {
             Ok(_) => {
                 log::info!("Lock acquired for {} ({}p). Starting download.", video_id, height);
-                break; 
-            },
+                break;
+            }
             Err(_) => {
-                // Проверка на "протухший" лок (старше 5 минут)
                 let is_stale = if let Ok(meta) = fs::metadata(&lock_path) {
-                     if let Ok(modified) = meta.modified() {
-                         SystemTime::now().duration_since(modified).unwrap_or(Duration::ZERO).as_secs() > 300 
-                     } else { false }
-                } else { false };
+                    if let Ok(modified) = meta.modified() {
+                        SystemTime::now()
+                            .duration_since(modified)
+                            .unwrap_or(Duration::ZERO)
+                            .as_secs()
+                            > 300
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
 
                 if is_stale {
                     log::warn!("Found stale lock for {}. Removing.", video_id);
                     let _ = fs::remove_file(&lock_path);
-                    continue; 
+                    continue;
                 }
 
-                log::info!("Video {} ({}p) is locked by another process. Waiting...", video_id, height);
+                log::info!(
+                    "Video {} ({}p) is locked by another process. Waiting...",
+                    video_id,
+                    height
+                );
                 tokio::time::sleep(Duration::from_secs(1)).await;
 
                 if start_time.elapsed().as_secs() > 300 {
-                    return Err("Timeout waiting for another download process".to_string());
+                    return Err(
+                        "Timeout waiting for another download process".to_string()
+                    );
                 }
             }
         }
     }
 
-    // --- Подготовка yt-dlp ---
-    
+    // --- Prepare args ---
     let yt_dlp = yt_dlp_binary();
     let ffmpeg = ffmpeg_binary();
-    let ffmpeg_path = Path::new(&ffmpeg);
-    let ffmpeg_dir = ffmpeg_path.parent().unwrap_or(Path::new(".")).to_string_lossy().to_string();
 
-    let cookie_paths = collect_cookie_paths();
-    let cookie_arg = if let Some(path) = cookie_paths.first() {
-        Some(path.to_string_lossy().to_string())
-    } else {
-        None
+    let ffmpeg_location_arg: Option<String> = {
+        let p = Path::new(&ffmpeg);
+        if p.is_absolute() {
+            // Full path known — pass the parent directory (yt-dlp wants a dir)
+            p.parent()
+                .map(|d| d.to_string_lossy().to_string())
+                .filter(|s| !s.is_empty())
+        } else {
+            // Just "ffmpeg" — it's in PATH; don't pass --ffmpeg-location at all
+            None
+        }
     };
 
-    // Шаблон имени для yt-dlp (он сам подставит расширение)
-    // Важно: имя шаблона должно совпадать с ожидаемым final_path, но без расширения .mp4,
-    // так как мы форсируем merge в mp4
-    let output_template = temp_dir.join(format!("yt_api_video_{}_{}p.%(ext)s", video_id, height));
+    let cookie_paths = collect_cookie_paths();
+    let cookie_arg = cookie_paths
+        .first()
+        .map(|p| p.to_string_lossy().to_string());
+
+    let output_template = temp_dir
+        .join(format!("yt_api_video_{}_{}p.%(ext)s", video_id, height));
     let output_template_str = output_template.to_string_lossy().to_string();
+
+    let output_stem = format!("yt_api_video_{}_{}p", video_id, height);
 
     let download_result = task::spawn_blocking(move || {
         let mut cmd = Command::new(&yt_dlp);
-        
-        // --- ВАЖНОЕ ИЗМЕНЕНИЕ ДЛЯ WINDOWS 7 ---
-        // 1. Приоритет: H.264 (avc) + AAC (mp4a) <= нужной высоты
-        // 2. Если нет, то любой MP4 <= нужной высоты
-        // 3. Если нет, то просто best
         let format_selector = format!(
-            "bestvideo[height<={}][vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[height<={}][ext=mp4]+bestaudio[ext=m4a]/best[height<={}][ext=mp4]/best", 
+            "bestvideo[height<={}][vcodec^=avc]+bestaudio[acodec^=mp4a]\
+             /bestvideo[height<={}][ext=mp4]+bestaudio[ext=m4a]\
+             /best[height<={}][ext=mp4]\
+             /best[ext=mp4]",
             height, height, height
         );
 
         cmd.arg("-f").arg(&format_selector);
-        cmd.arg("--merge-output-format").arg("mp4"); // Гарантируем контейнер MP4
+        cmd.arg("--merge-output-format").arg("mp4");
+        cmd.arg("--remux-video").arg("mp4");
         cmd.arg("-N").arg("4");
         cmd.arg("--output").arg(&output_template_str);
-        cmd.arg("--ffmpeg-location").arg(&ffmpeg_dir);
+
+        // Only pass --ffmpeg-location when we have a real directory
+        if let Some(ref loc) = ffmpeg_location_arg {
+            cmd.arg("--ffmpeg-location").arg(loc);
+        }
+
         cmd.arg("--no-playlist");
         cmd.arg("--force-overwrites");
-        
-        // Опционально: можно добавить --postprocessor-args для ffmpeg, чтобы убедиться в faststart
-        // cmd.arg("--postprocessor-args").arg("Merger+ffmpeg:-movflags +faststart");
 
         if let Some(c) = cookie_arg {
             cmd.arg("--cookies").arg(c);
@@ -177,8 +197,12 @@ async fn download_mux_to_temp_file(
 
         cmd.arg(format!("https://www.youtube.com/watch?v={}", video_id));
 
-        log::info!("Starting yt-dlp for {}p...", height);
-        
+        log::info!(
+            "Starting yt-dlp for {}p (ffmpeg-location: {:?})...",
+            height,
+            ffmpeg_location_arg
+        );
+
         let output = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -186,20 +210,104 @@ async fn download_mux_to_temp_file(
             .output()
             .map_err(|e| format!("Failed to execute yt-dlp: {}", e))?;
 
+        // Always log yt-dlp output so problems are visible in logs
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stdout.trim().is_empty() {
+            log::info!("yt-dlp stdout:\n{}", stdout);
+        }
+        if !stderr.trim().is_empty() {
+            log::info!("yt-dlp stderr:\n{}", stderr);
+        }
+
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            log::error!("yt-dlp failed.\nSTDERR: {}", stderr);
+            log::error!("yt-dlp exited with error status.");
             return Err(format!("yt-dlp error: {}", stderr));
         }
 
+        // --- Fast path: expected .mp4 file exists ---
         if final_path.exists() {
-            Ok(final_path)
-        } else {
-            Err("File not found after yt-dlp finished. Probably merged to mkv instead of mp4?".to_string())
+            log::info!("yt-dlp produced expected file: {}", final_path.display());
+            return Ok(final_path);
         }
-    }).await;
 
-    // Удаляем лок
+        // --- Recovery path: yt-dlp succeeded but wrote a different extension ---
+        // This happens when merge fell back to a container yt-dlp chose on its own
+        // (e.g. .mkv, .webm). Scan the temp dir for any file whose stem matches and
+        // remux to mp4 using ffmpeg.
+        log::warn!(
+            "Expected file not found: {}. Scanning temp dir for alternate extension...",
+            final_path.display()
+        );
+
+        let temp_dir_inner = final_path.parent().unwrap_or(Path::new("/tmp"));
+        let alternate: Option<PathBuf> = fs::read_dir(temp_dir_inner)
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .find(|p| {
+                        if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                            name.starts_with(&output_stem)
+                                && !name.ends_with(".lock")
+                                && !name.ends_with(".part")
+                                && !name.contains(".f")     // skip .f137.mp4 partial files
+                                && p.extension()
+                                    .and_then(|e| e.to_str())
+                                    .map(|ext| ext != "mp4")
+                                    .unwrap_or(false)
+                        } else {
+                            false
+                        }
+                    })
+            });
+
+        match alternate {
+            Some(src) => {
+                log::warn!(
+                    "Found alternate file: {}. Remuxing to mp4 with ffmpeg...",
+                    src.display()
+                );
+                let ffmpeg_bin = ffmpeg_binary();
+                let remux_status = Command::new(&ffmpeg_bin)
+                    .args([
+                        "-y",
+                        "-i", &src.to_string_lossy(),
+                        "-c", "copy",
+                        "-movflags", "+faststart",
+                        &final_path.to_string_lossy().to_string(),
+                    ])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::piped())
+                    .status();
+
+                match remux_status {
+                    Ok(s) if s.success() => {
+                        log::info!("Remux successful: {}", final_path.display());
+                        let _ = fs::remove_file(&src); // clean up source
+                        Ok(final_path)
+                    }
+                    Ok(s) => {
+                        Err(format!(
+                            "ffmpeg remux failed with exit code {:?} (source: {})",
+                            s.code(),
+                            src.display()
+                        ))
+                    }
+                    Err(e) => Err(format!("Failed to run ffmpeg for remux: {}", e)),
+                }
+            }
+            None => Err(format!(
+                "yt-dlp finished (exit 0) but no output file found for stem '{}' in {}",
+                output_stem,
+                temp_dir_inner.display()
+            )),
+        }
+    })
+    .await;
+
     let _ = fs::remove_file(&lock_path);
 
     match download_result {
