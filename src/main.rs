@@ -1,7 +1,7 @@
 use actix_files as fs;
 use actix_web::middleware::{NormalizePath, TrailingSlash};
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 

@@ -1,10 +1,12 @@
 use actix_web::http::header::{HeaderValue, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, LOCATION};
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
-use cookie_scoop::{get_cookies, to_cookie_header};
-use cookie_scoop::types::{BrowserName, GetCookiesOptions};
+use bytes::Bytes;
 use futures_util::StreamExt;
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, Write};
+use std::process::Stdio;
 use std::env;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use html_escape::decode_html_entities;
 use image::{GenericImageView, Pixel};
 use lazy_static::lazy_static;
@@ -14,12 +16,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
-use std::process::{Command, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use tokio::task;
 use urlencoding;
@@ -64,6 +65,256 @@ fn extract_initial_player_response(html: &str) -> serde_json::Value {
         }
     }
     serde_json::Value::Object(serde_json::Map::new())
+}
+
+async fn download_mux_to_temp_file(
+    video_id: String,
+    height: u32,
+) -> Result<PathBuf, String> {
+    let temp_dir = env::temp_dir();
+
+    let final_file_name = format!("yt_api_video_{}_{}p.mp4", video_id, height);
+    let final_path = temp_dir.join(&final_file_name);
+
+    let lock_file_name = format!("yt_api_video_{}_{}p.lock", video_id, height);
+    let lock_path = temp_dir.join(&lock_file_name);
+
+    // Already cached
+    if final_path.exists() {
+        log::info!("Video cached ({}p): {}. Serving.", height, final_file_name);
+        return Ok(final_path);
+    }
+
+    // --- Locking ---
+    let start_time = std::time::Instant::now();
+    loop {
+        if final_path.exists() {
+            log::info!("Parallel download finished. Serving {}p.", height);
+            return Ok(final_path);
+        }
+
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+        {
+            Ok(_) => {
+                log::info!("Lock acquired for {} ({}p). Starting download.", video_id, height);
+                break;
+            }
+            Err(_) => {
+                let is_stale = if let Ok(meta) = fs::metadata(&lock_path) {
+                    if let Ok(modified) = meta.modified() {
+                        SystemTime::now()
+                            .duration_since(modified)
+                            .unwrap_or(Duration::ZERO)
+                            .as_secs()
+                            > 300
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                if is_stale {
+                    log::warn!("Found stale lock for {}. Removing.", video_id);
+                    let _ = fs::remove_file(&lock_path);
+                    continue;
+                }
+
+                log::info!(
+                    "Video {} ({}p) is locked by another process. Waiting...",
+                    video_id,
+                    height
+                );
+                tokio::time::sleep(Duration::from_secs(1)).await;
+
+                if start_time.elapsed().as_secs() > 300 {
+                    return Err(
+                        "Timeout waiting for another download process".to_string()
+                    );
+                }
+            }
+        }
+    }
+
+    // --- Prepare args ---
+    let yt_dlp = yt_dlp_binary();
+    let ffmpeg = ffmpeg_binary();
+
+    let ffmpeg_location_arg: Option<String> = {
+        let p = Path::new(&ffmpeg);
+        if p.is_absolute() {
+            // Full path known — pass the parent directory (yt-dlp wants a dir)
+            p.parent()
+                .map(|d| d.to_string_lossy().to_string())
+                .filter(|s| !s.is_empty())
+        } else {
+            // Just "ffmpeg" — it's in PATH; don't pass --ffmpeg-location at all
+            None
+        }
+    };
+
+    let cookie_paths = collect_cookie_paths();
+    let cookie_arg = cookie_paths
+        .first()
+        .map(|p| p.to_string_lossy().to_string());
+
+    let output_template = temp_dir
+        .join(format!("yt_api_video_{}_{}p.%(ext)s", video_id, height));
+    let output_template_str = output_template.to_string_lossy().to_string();
+
+    let output_stem = format!("yt_api_video_{}_{}p", video_id, height);
+
+    let download_result = task::spawn_blocking(move || {
+        let mut cmd = Command::new(&yt_dlp);
+        let format_selector = format!(
+            "bestvideo[height<={}][vcodec^=avc]+bestaudio[acodec^=mp4a]\
+             /bestvideo[height<={}][ext=mp4]+bestaudio[ext=m4a]\
+             /best[height<={}][ext=mp4]\
+             /best[ext=mp4]",
+            height, height, height
+        );
+
+        cmd.arg("-f").arg(&format_selector);
+        cmd.arg("--merge-output-format").arg("mp4");
+        cmd.arg("--remux-video").arg("mp4");
+        cmd.arg("-N").arg("4");
+        cmd.arg("--output").arg(&output_template_str);
+
+        // Only pass --ffmpeg-location when we have a real directory
+        if let Some(ref loc) = ffmpeg_location_arg {
+            cmd.arg("--ffmpeg-location").arg(loc);
+        }
+
+        cmd.arg("--no-playlist");
+        cmd.arg("--force-overwrites");
+
+        if let Some(c) = cookie_arg {
+            cmd.arg("--cookies").arg(c);
+        }
+
+        cmd.arg(format!("https://www.youtube.com/watch?v={}", video_id));
+
+        log::info!(
+            "Starting yt-dlp for {}p (ffmpeg-location: {:?})...",
+            height,
+            ffmpeg_location_arg
+        );
+
+        let output = cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| format!("Failed to execute yt-dlp: {}", e))?;
+
+        // Always log yt-dlp output so problems are visible in logs
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stdout.trim().is_empty() {
+            log::info!("yt-dlp stdout:\n{}", stdout);
+        }
+        if !stderr.trim().is_empty() {
+            log::info!("yt-dlp stderr:\n{}", stderr);
+        }
+
+        if !output.status.success() {
+            log::error!("yt-dlp exited with error status.");
+            return Err(format!("yt-dlp error: {}", stderr));
+        }
+
+        // --- Fast path: expected .mp4 file exists ---
+        if final_path.exists() {
+            log::info!("yt-dlp produced expected file: {}", final_path.display());
+            return Ok(final_path);
+        }
+
+        // --- Recovery path: yt-dlp succeeded but wrote a different extension ---
+        // This happens when merge fell back to a container yt-dlp chose on its own
+        // (e.g. .mkv, .webm). Scan the temp dir for any file whose stem matches and
+        // remux to mp4 using ffmpeg.
+        log::warn!(
+            "Expected file not found: {}. Scanning temp dir for alternate extension...",
+            final_path.display()
+        );
+
+        let temp_dir_inner = final_path.parent().unwrap_or(Path::new("/tmp"));
+        let alternate: Option<PathBuf> = fs::read_dir(temp_dir_inner)
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .find(|p| {
+                        if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                            name.starts_with(&output_stem)
+                                && !name.ends_with(".lock")
+                                && !name.ends_with(".part")
+                                && !name.contains(".f")     // skip .f137.mp4 partial files
+                                && p.extension()
+                                    .and_then(|e| e.to_str())
+                                    .map(|ext| ext != "mp4")
+                                    .unwrap_or(false)
+                        } else {
+                            false
+                        }
+                    })
+            });
+
+        match alternate {
+            Some(src) => {
+                log::warn!(
+                    "Found alternate file: {}. Remuxing to mp4 with ffmpeg...",
+                    src.display()
+                );
+                let ffmpeg_bin = ffmpeg_binary();
+                let remux_status = Command::new(&ffmpeg_bin)
+                    .args([
+                        "-y",
+                        "-i", &src.to_string_lossy(),
+                        "-c", "copy",
+                        "-movflags", "+faststart",
+                        &final_path.to_string_lossy().to_string(),
+                    ])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::piped())
+                    .status();
+
+                match remux_status {
+                    Ok(s) if s.success() => {
+                        log::info!("Remux successful: {}", final_path.display());
+                        let _ = fs::remove_file(&src); // clean up source
+                        Ok(final_path)
+                    }
+                    Ok(s) => {
+                        Err(format!(
+                            "ffmpeg remux failed with exit code {:?} (source: {})",
+                            s.code(),
+                            src.display()
+                        ))
+                    }
+                    Err(e) => Err(format!("Failed to run ffmpeg for remux: {}", e)),
+                }
+            }
+            None => Err(format!(
+                "yt-dlp finished (exit 0) but no output file found for stem '{}' in {}",
+                output_stem,
+                temp_dir_inner.display()
+            )),
+        }
+    })
+    .await;
+
+    let _ = fs::remove_file(&lock_path);
+
+    match download_result {
+        Ok(Ok(path)) => Ok(path),
+        Ok(Err(e)) => Err(e),
+        Err(e) => Err(format!("Task join error: {}", e)),
+    }
 }
 
 fn get_comments_token(data: &serde_json::Value) -> Option<String> {
@@ -261,108 +512,6 @@ fn find_likes(next_data: &serde_json::Value) -> String {
     search_number_near(next_data, &["like", "likes", "лайк", "лайков", "лайка"])
 }
 
-fn find_dislikes(next_data: &serde_json::Value) -> String {
-    // Modern web response schema: segmentedLikeDislikeButtonViewModel
-    if let Some(contents) = next_data
-        .get("contents")
-        .and_then(|c| c.get("twoColumnWatchNextResults"))
-        .and_then(|c| c.get("results"))
-        .and_then(|r| r.get("results"))
-        .and_then(|r| r.get("contents"))
-        .and_then(|c| c.as_array())
-    {
-        if let Some(primary_info) = contents.first().and_then(|c| c.get("videoPrimaryInfoRenderer")) {
-            if let Some(top_level_buttons) = primary_info
-                .get("videoActions")
-                .and_then(|va| va.get("menuRenderer"))
-                .and_then(|mr| mr.get("topLevelButtons"))
-                .and_then(|btns| btns.as_array())
-            {
-                // Dislike is typically on the same segmented control.
-                for btn in top_level_buttons {
-                    if let Some(seg) = btn.get("segmentedLikeDislikeButtonViewModel") {
-                        if let Some(dislike_vm) = seg
-                            .get("dislikeButtonViewModel")
-                            .and_then(|v| v.get("dislikeButtonViewModel"))
-                            .and_then(|v| v.get("toggleButtonViewModel"))
-                            .and_then(|v| v.get("toggleButtonViewModel"))
-                        {
-                            for key in ["toggledButtonViewModel", "defaultButtonViewModel"] {
-                                if let Some(button_vm) = dislike_vm
-                                    .get(key)
-                                    .and_then(|v| v.get("buttonViewModel"))
-                                {
-                                    if let Some(title) = button_vm.get("title").and_then(|t| t.as_str())
-                                    {
-                                        if !title.is_empty() && title.chars().any(|c| c.is_ascii_digit())
-                                        {
-                                            return parse_human_number(title);
-                                        }
-                                    }
-                                    if let Some(acc_text) = button_vm
-                                        .get("accessibilityText")
-                                        .and_then(|t| t.as_str())
-                                    {
-                                        if !acc_text.is_empty() {
-                                            if let Some(caps) = regex::Regex::new(r"(\d[\d, ]*)")
-                                                .unwrap()
-                                                .captures(acc_text)
-                                            {
-                                                return parse_human_number(&caps[1]);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Older schema: segmentedLikeDislikeButtonRenderer
-                    if let Some(seg) = btn.get("segmentedLikeDislikeButtonRenderer") {
-                        if let Some(dislike_btn) = seg
-                            .get("dislikeButton")
-                            .and_then(|b| b.get("toggleButtonRenderer"))
-                        {
-                            // Attempt: defaultText/simpleText or accessibility label.
-                            if let Some(default_text) = dislike_btn.get("defaultText") {
-                                let t = simplify_text(default_text);
-                                if !t.is_empty() && t.chars().any(|c| c.is_ascii_digit()) {
-                                    return parse_human_number(&t);
-                                }
-                            }
-                            if let Some(acc) = dislike_btn
-                                .get("accessibility")
-                                .and_then(|a| a.get("accessibilityData"))
-                                .and_then(|a| a.get("label"))
-                                .and_then(|l| l.as_str())
-                            {
-                                if let Some(caps) =
-                                    regex::Regex::new(r"(\d[\d, ]*)").unwrap().captures(acc)
-                                {
-                                    return parse_human_number(&caps[1]);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Fallback: heuristic scan for strings mentioning dislikes.
-    search_number_near(
-        next_data,
-        &[
-            "dislike",
-            "dislikes",
-            "дизлайк",
-            "дизлайков",
-            "дизлайка",
-            "не нравится",
-        ],
-    )
-}
-
 fn parse_human_number(s: &str) -> String {
     if s.is_empty() {
         return "0".to_string();
@@ -372,24 +521,11 @@ fn parse_human_number(s: &str) -> String {
     let mut cleaned = String::with_capacity(trimmed.len());
     
     for c in trimmed.chars() {
-        if c != ' ' {
+        if c != ',' && c != ' ' {
             cleaned.push(c.to_ascii_uppercase());
         }
     }
     
-    // If we have a compact suffix (K/M/B) and only commas (no dot), treat comma as decimal separator.
-    // Example: "92,7K" => "92.7K". If both dot and comma exist, treat comma as thousands separator.
-    if cleaned.len() > 1 {
-        let last_char = cleaned.chars().last().unwrap();
-        if matches!(last_char, 'K' | 'M' | 'B') {
-            if cleaned.contains('.') && cleaned.contains(',') {
-                cleaned = cleaned.replace(',', "");
-            } else if cleaned.contains(',') && !cleaned.contains('.') {
-                cleaned = cleaned.replace(',', ".");
-            }
-        }
-    }
-
     if cleaned.len() > 1 {
         let last_char = cleaned.chars().last().unwrap();
         if last_char.is_alphabetic() {
@@ -424,52 +560,6 @@ fn parse_human_number(s: &str) -> String {
     result
 }
 
-fn parse_compact_count(text: &str) -> Option<String> {
-    // Intended for subscriber counts and similar compact formats.
-    // Supports: "92.7K", "92,7K", "1,234", "92,7 тыс", "1,2 млн", etc.
-    let raw = text.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    let lower = raw.to_lowercase();
-
-    // Remove common words around the number.
-    let cleaned = lower
-        .replace("subscribers", "")
-        .replace("subscriber", "")
-        .replace("подписчиков", "")
-        .replace("подписчик", "")
-        .replace("подписчика", "")
-        .replace("подписки", "")
-        .trim()
-        .to_string();
-
-    // Russian multipliers.
-    if cleaned.contains("тыс") || cleaned.contains("млн") {
-        let mult = if cleaned.contains("млн") { 1_000_000.0 } else { 1_000.0 };
-        let re = regex::Regex::new(r"(\d[\d\s\.,]*)").ok()?;
-        let cap = re.captures(&cleaned)?;
-        let mut num = cap.get(1)?.as_str().to_string();
-        num = num.replace(' ', "");
-        if num.contains('.') && num.contains(',') {
-            num = num.replace(',', "");
-        } else if num.contains(',') && !num.contains('.') {
-            num = num.replace(',', ".");
-        }
-        if let Ok(v) = num.parse::<f64>() {
-            return Some(((v * mult).round() as u64).to_string());
-        }
-    }
-
-    // Fallback: reuse K/M/B parser.
-    let n = parse_human_number(&cleaned);
-    if n.is_empty() {
-        None
-    } else {
-        Some(n)
-    }
-}
-
 fn find_subscriber_count(nd: &serde_json::Value) -> String {
     
     if let Some(contents) = nd.get("contents") {
@@ -491,15 +581,29 @@ fn find_subscriber_count(nd: &serde_json::Value) -> String {
                                                     sub_text.get("runs").and_then(|r| r.as_array()).and_then(|arr| arr.first()).and_then(|r| r.get("text").and_then(|t| t.as_str()))
                                                 });
                                             if let Some(simple_text) = text {
-                                                if let Some(n) = parse_compact_count(simple_text) {
-                                                    return n;
+                                                let cleaned = simple_text.replace(" подписчиков", "").replace(" подписчик", "").replace(" subscribers", "").replace(" subscriber", "");
+                                                
+                                                let re = regex::Regex::new(r"([\d,]+\.?\d*)\s*(млн|тыс|[KM]?)").unwrap();
+                                                if let Some(captures) = re.captures(&cleaned) {
+                                                    let number_part = &captures[1].replace(",", "").replace(".", ""); // Remove commas and dots
+                                                    let multiplier = &captures[2];
+                                                    
+                                                    if let Ok(number) = number_part.parse::<f64>() {
+                                                        let result = match multiplier {
+                                                            "млн" => (number * 1000000.0) as u64, // Russian million
+                                                            "тыс" => (number * 1000.0) as u64,    // Russian thousand
+                                                            "K" => (number * 1000.0) as u64,      // English thousand
+                                                            "M" => (number * 1000000.0) as u64,   // English million
+                                                            _ => number as u64,                   // No multiplier
+                                                        };
+                                                        return result.to_string();
+                                                    }
                                                 }
-                                                let digits: String =
-                                                    simple_text.chars().filter(|c| c.is_ascii_digit()).collect();
+                                                let digits: String = cleaned.chars().filter(|c| c.is_ascii_digit()).collect();
                                                 if !digits.is_empty() {
                                                     return digits;
                                                 }
-                                                return simple_text.to_string();
+                                                return cleaned;
                                             }
                                         }
                                     }
@@ -715,16 +819,42 @@ lazy_static! {
     static ref THUMBNAIL_CACHE: Arc<Mutex<LruCache<String, (Vec<u8>, String, u64)>>> = Arc::new(
         Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1000).unwrap()))
     );
-    static ref PLAYER_RESPONSE_CACHE: Arc<Mutex<LruCache<String, (Value, u64)>>> = Arc::new(
-        Mutex::new(LruCache::new(std::num::NonZeroUsize::new(512).unwrap()))
-    );
-    static ref BROWSER_COOKIE_CACHE: Arc<Mutex<Option<(String, u64)>>> = Arc::new(Mutex::new(None));
     static ref DIRECT_URL_CLEANUP_STARTED: AtomicBool = AtomicBool::new(false);
 }
 
 const CACHE_DURATION: u64 = 3600;
-const PLAYER_CACHE_TTL: u64 = 30;
-const COOKIE_CACHE_TTL: u64 = 300;
+
+fn ffmpeg_binary() -> String {
+    let exe_name = if cfg!(target_os = "windows") { "ffmpeg.exe" } else { "ffmpeg" };
+
+    // 1. Ищем в текущей рабочей папке (откуда запущен cargo run)
+    if let Ok(cwd) = std::env::current_dir() {
+        let direct_path = cwd.join(exe_name);
+        if direct_path.exists() {
+            return direct_path.to_string_lossy().to_string();
+        }
+        let assets_path = cwd.join("assets").join(exe_name);
+        if assets_path.exists() {
+            return assets_path.to_string_lossy().to_string();
+        }
+    }
+
+    // 2. Ищем рядом с самим скомпилированным бинарником (полезно для продакшена)
+    if let Ok(mut exe_dir) = std::env::current_exe() {
+        exe_dir.pop();
+        let direct_path = exe_dir.join(exe_name);
+        if direct_path.exists() {
+            return direct_path.to_string_lossy().to_string();
+        }
+        let assets_path = exe_dir.join("assets").join(exe_name);
+        if assets_path.exists() {
+            return assets_path.to_string_lossy().to_string();
+        }
+    }
+
+    // 3. Fallback: надеемся, что ffmpeg есть в PATH
+    exe_name.to_string()
+}
 
 fn get_duration_from_player_response(data: &serde_json::Value) -> u64 {
     // Пытаемся достать длительность из videoDetails
@@ -749,19 +879,15 @@ fn get_duration_from_player_response(data: &serde_json::Value) -> u64 {
     0 // Если не нашли, считаем видео коротким/потоком
 }
 
-fn ffmpeg_binary() -> String {
-    let exe_name = if cfg!(target_os = "windows") { "ffmpeg.exe" } else { "ffmpeg" };
-    if let Ok(cwd) = std::env::current_dir() {
-        let direct_path = cwd.join(exe_name);
-        if direct_path.exists() {
-            return direct_path.to_string_lossy().to_string();
+fn yt_dlp_binary() -> String {
+    if cfg!(target_os = "windows") {
+        if Path::new("assets/yt-dlp.exe").exists() {
+            return "assets/yt-dlp.exe".to_string();
         }
-        let assets_path = cwd.join("assets").join(exe_name);
-        if assets_path.exists() {
-            return assets_path.to_string_lossy().to_string();
-        }
+    } else if Path::new("assets/yt-dlp").exists() {
+        return "assets/yt-dlp".to_string();
     }
-    exe_name.to_string()
+    "yt-dlp".to_string()
 }
 
 fn sanitize_text(input: &str) -> String {
@@ -818,6 +944,30 @@ async fn dominant_color_from_url(url: &str) -> Option<String> {
     .flatten()
 }
 
+fn collect_cookie_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Ok(entries) = fs::read_dir("cookies") {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file() {
+                if let Some(ext) = p.extension() {
+                    if ext == "txt" {
+                        paths.push(p);
+                    }
+                }
+            }
+        }
+    }
+    let legacy = ["assets/cookies.txt", "cookies.txt"];
+    for p in legacy {
+        let pb = PathBuf::from(p);
+        if pb.exists() {
+            paths.push(pb);
+        }
+    }
+    paths
+}
+
 fn parse_quality_height(quality: &str) -> Option<u32> {
     let s = quality.trim().to_lowercase();
     let digits: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
@@ -846,6 +996,175 @@ fn parse_quality_height(quality: &str) -> Option<u32> {
     .into_iter()
     .collect();
     aliases.get(s.as_str()).copied()
+}
+
+fn stream_converted_video(
+    source_url: &str,
+    user_agent: &str,
+    _video_id: &str,
+    codec: &str,
+    _permit: Option<tokio::sync::OwnedSemaphorePermit>,
+) -> HttpResponse {
+    let source_url = source_url.to_string();
+    let ua = user_agent.to_string();
+    let codec_str = codec.to_string();
+    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    
+    let ffmpeg = ffmpeg_binary();
+
+    std::thread::spawn(move || {
+        let _permit = _permit; // Hold semaphore permit
+        let temp_dir = env::temp_dir();
+        let temp_file_name = format!(
+            "yt_api_video_{}_{}.{}",
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis(),
+            std::process::id(),
+            if codec_str == "mpeg4" { "mp4" } else { "3gp" }
+        );
+        let temp_file_path = temp_dir.join(temp_file_name);
+
+        // 1. Download the stream using Rust (reqwest::blocking) instead of FFmpeg
+        // We move the network logic that caused the crash out of FFmpeg
+        let client = reqwest::blocking::Client::new();
+        let download_result = client
+            .get(&source_url)
+            .header("User-Agent", &ua)
+            .header("Referer", "https://www.youtube.com")
+            .header("Origin", "https://www.youtube.com")
+            .send();
+
+        let mut response = match download_result {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx.blocking_send(Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Failed to start download: {}", e)
+                )));
+                return;
+            }
+        };
+
+        // 2. Prepare FFmpeg to read from STDIN (pipe:0)
+        let mut cmd = Command::new(&ffmpeg);
+        cmd.args([
+            "-y",
+            "-hide_banner", "-loglevel", "error",
+            // REMOVED: -nostdin (we need stdin!)
+            // REMOVED: -reconnect, -user_agent, -headers, -i URL (network args)
+            "-i", "pipe:0", // Read from Stdin
+        ]);
+
+        if codec_str == "mpeg4" {
+            cmd.args([
+                "-c:v", "mpeg4", "-vtag", "mp4v", "-b:v", "501k",
+                "-brand", "isom", "-pix_fmt", "yuv420p",
+                "-c:a", "copy", "-f", "mp4",
+            ]);
+        } else {
+            cmd.args([
+                "-c:v", "h263", "-vf", "scale=352:288",
+                "-c:a", "libopencore_amrnb", "-ar", "8000", "-ac", "1",
+                "-f", "3gp",
+            ]);
+        }
+
+        let temp_path_str = temp_file_path.to_string_lossy().to_string();
+        cmd.arg(&temp_path_str);
+
+        // Configure Stdin to be piped
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tx.blocking_send(Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("FFmpeg failed to start: {}", e)
+                )));
+                return;
+            }
+        };
+
+        // 3. Pipe data from HTTP response to FFmpeg stdin
+        // We take() stdin here to get the handle
+        if let Some(mut stdin) = child.stdin.take() {
+            let mut buffer = [0u8; 8192];
+            loop {
+                match response.read(&mut buffer) {
+                    Ok(0) => break, // EOF
+                    Ok(n) => {
+                        if stdin.write_all(&buffer[..n]).is_err() {
+                            // FFmpeg might have closed stdin early (error or finished)
+                            break; 
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Network read error: {}", e);
+                        break;
+                    }
+                }
+            }
+        } 
+        // Drop stdin handle to signal EOF to FFmpeg
+
+        // 4. Wait for FFmpeg to finish
+        let output = match child.wait_with_output() {
+            Ok(o) => o,
+            Err(e) => {
+                let _ = tx.blocking_send(Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("FFmpeg wait error: {}", e)
+                )));
+                let _ = fs::remove_file(&temp_file_path);
+                return;
+            }
+        };
+
+        if !output.status.success() {
+            let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
+            log::error!(
+                "FFmpeg conversion failed. Status: {:?} | STDERR: {}",
+                output.status, err_msg
+            );
+            let _ = tx.blocking_send(Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("FFmpeg failed: {}", err_msg)
+            )));
+            let _ = fs::remove_file(&temp_file_path);
+            return;
+        }
+
+        // 5. Stream the resulting file back (Same logic as before)
+        match fs::File::open(&temp_file_path) {
+            Ok(mut file) => {
+                let mut buffer = [0u8; 65536];
+                loop {
+                    match file.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if tx.blocking_send(Ok(Bytes::copy_from_slice(&buffer[..n]))).is_err() { break; }
+                        }
+                        Err(e) => {
+                            let _ = tx.blocking_send(Err(e));
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = tx.blocking_send(Err(e));
+            }
+        }
+
+        let _ = fs::remove_file(&temp_file_path);
+    });
+
+    let mime_type = if codec == "mpeg4" { "video/mp4" } else { "video/3gpp" };
+    let stream = ReceiverStream::new(rx).map(|r| r.map(web::Bytes::from).map_err(actix_web::error::ErrorInternalServerError));
+    HttpResponse::Ok()
+        .insert_header((CONTENT_TYPE, HeaderValue::from_str(mime_type).unwrap()))
+        .insert_header(("Cache-Control", "public, max-age=3600"))
+        .streaming(stream)
 }
 
 /// Removes old temp files created by direct_url: `yt_api_video_*` in temp_dir (older than 1h),
@@ -917,488 +1236,100 @@ async fn resolve_direct_stream_url(
     audio_only: bool,
     config: &crate::config::Config,
 ) -> Result<String, String> {
-    let player = fetch_player_response(video_id, config).await?;
-    let target_height = quality
-        .and_then(parse_quality_height)
-        .or_else(|| parse_quality_height(&config.video.default_quality));
-    if audio_only {
-        select_best_audio_url_from_player_response(&player)
-            .ok_or_else(|| "No direct audio URL found in Innertube response".to_string())
-    } else {
-        select_best_video_url_from_player_response(&player, target_height)
-            .ok_or_else(|| "No direct video URL found in Innertube response".to_string())
-    }
-}
-
-fn format_height(format: &Value) -> u32 {
-    format
-        .get("height")
-        .and_then(|v| v.as_u64())
-        .map(|h| h as u32)
-        .or_else(|| {
-            format
-                .get("qualityLabel")
-                .and_then(|v| v.as_str())
-                .and_then(parse_quality_height)
-        })
-        .unwrap_or(0)
-}
-
-fn format_audio_bitrate(format: &Value) -> u32 {
-    format
-        .get("bitrate")
-        .and_then(|v| v.as_u64())
-        .or_else(|| format.get("averageBitrate").and_then(|v| v.as_u64()))
-        .map(|b| b as u32)
-        .unwrap_or(0)
-}
-
-fn format_mime_type(format: &Value) -> String {
-    format
-        .get("mimeType")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_lowercase()
-}
-
-fn is_avc_mp4_video(format: &Value) -> bool {
-    let mime = format_mime_type(format);
-    mime.starts_with("video/mp4") && mime.contains("avc1")
-}
-
-fn is_mp4a_audio(format: &Value) -> bool {
-    let mime = format_mime_type(format);
-    mime.starts_with("audio/mp4") && mime.contains("mp4a")
-}
-
-fn select_best_audio_url_from_player_response(data: &Value) -> Option<String> {
-    let streaming = data.get("streamingData")?;
-    let mut candidates: Vec<&Value> = Vec::new();
-    if let Some(arr) = streaming.get("adaptiveFormats").and_then(|v| v.as_array()) {
-        candidates.extend(arr.iter());
-    }
-
-    let mut best: Option<((u8, u32), &str)> = None;
-    for f in candidates {
-        let mime = format_mime_type(f);
-        if !mime.starts_with("audio/") {
-            continue;
-        }
-        let url = match f.get("url").and_then(|v| v.as_str()) {
-            Some(u) => u,
-            None => continue,
-        };
-        let is_preferred_codec = if is_mp4a_audio(f) { 1 } else { 0 };
-        let bitrate = format_audio_bitrate(f);
-        let score = (is_preferred_codec, bitrate);
-        if best.map(|(current, _)| score > current).unwrap_or(true) {
-            best = Some((score, url));
-        }
-    }
-    best.map(|(_, url)| url.to_string())
-}
-
-fn select_best_video_url_from_player_response(data: &Value, target_height: Option<u32>) -> Option<String> {
-    let streaming = data.get("streamingData")?;
-    let target = target_height.unwrap_or(360);
-    let mut progressive_candidates: Vec<&Value> = Vec::new();
-    // `formats` are progressive streams (video+audio), preferred path without ffmpeg.
-    if let Some(arr) = streaming.get("formats").and_then(|v| v.as_array()) {
-        progressive_candidates.extend(arr.iter());
-    }
-
-    // Similar to yt-dlp intent: best progressive video with height <= target.
-    let mut best_under_or_equal: Option<((u8, u32, u32), &str)> = None;
-    let mut best_over_target: Option<((u8, u32, u32), &str)> = None;
-
-    for f in progressive_candidates {
-        let url = match f.get("url").and_then(|v| v.as_str()) {
-            Some(u) => u,
-            None => continue,
-        };
-        let mime = format_mime_type(f);
-        if !mime.starts_with("video/") {
-            continue;
-        }
-
-        let has_audio = f.get("audioQuality").is_some() || f.get("audioSampleRate").is_some();
-        if !has_audio {
-            continue;
-        }
-        let is_preferred_codec = if is_avc_mp4_video(f) { 1 } else { 0 };
-        let height = format_height(f);
-        if height == 0 {
-            continue;
-        }
-        let bitrate = f
-            .get("bitrate")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32)
-            .unwrap_or(0);
-
-        if height <= target {
-            let score = (is_preferred_codec, height, bitrate);
-            if best_under_or_equal
-                .map(|(current, _)| score > current)
-                .unwrap_or(true)
-            {
-                best_under_or_equal = Some((score, url));
-            }
+    let video_id = video_id.to_string();
+    let quality = quality
+        .map(|q| q.to_string())
+        .unwrap_or_else(|| config.video.default_quality.clone());
+    let use_cookies = config.video.use_cookies;
+    let yt_dlp = yt_dlp_binary();
+    let mut cookie_paths = Vec::new();
+    if use_cookies {
+        cookie_paths = collect_cookie_paths();
+        let names: Vec<String> = cookie_paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        if names.is_empty() {
+            log::info!("Cookies enabled; found 0 files");
         } else {
-            // Fallback: nearest quality above target when <=target is unavailable.
-            let inverse_height = u32::MAX - height;
-            let score = (is_preferred_codec, inverse_height, bitrate);
-            if best_over_target
-                .map(|(current, _)| score > current)
-                .unwrap_or(true)
-            {
-                best_over_target = Some((score, url));
-            }
+            log::info!(
+                "Cookies enabled; found {} files: {}",
+                names.len(),
+                names.join(", ")
+            );
         }
     }
 
-    let progressive_best = best_under_or_equal
-        .or(best_over_target)
-        .map(|(_, url)| url.to_string());
-    if progressive_best.is_some() {
-        return progressive_best;
-    }
-
-    // Fallback for videos where progressive formats are missing.
-    let mut adaptive_candidates: Vec<&Value> = Vec::new();
-    if let Some(arr) = streaming.get("adaptiveFormats").and_then(|v| v.as_array()) {
-        adaptive_candidates.extend(arr.iter());
-    }
-    let mut fallback_under_or_equal: Option<((u8, u32, u32), &str)> = None;
-    let mut fallback_over_target: Option<((u8, u32, u32), &str)> = None;
-    for f in adaptive_candidates {
-        let url = match f.get("url").and_then(|v| v.as_str()) {
-            Some(u) => u,
-            None => continue,
-        };
-        let mime = format_mime_type(f);
-        if !mime.starts_with("video/") {
-            continue;
-        }
-        let is_preferred_codec = if is_avc_mp4_video(f) { 1 } else { 0 };
-        let height = format_height(f);
-        if height == 0 {
-            continue;
-        }
-        let bitrate = f
-            .get("bitrate")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32)
-            .unwrap_or(0);
-        if height <= target {
-            let score = (is_preferred_codec, height, bitrate);
-            if fallback_under_or_equal
-                .map(|(current, _)| score > current)
-                .unwrap_or(true)
-            {
-                fallback_under_or_equal = Some((score, url));
-            }
+    task::spawn_blocking(move || {
+        let url = format!("https://www.youtube.com/watch?v={}", video_id);
+        let format_selector = if audio_only {
+            "bestaudio/best".to_string()
         } else {
-            let inverse_height = u32::MAX - height;
-            let score = (is_preferred_codec, inverse_height, bitrate);
-            if fallback_over_target
-                .map(|(current, _)| score > current)
-                .unwrap_or(true)
-            {
-                fallback_over_target = Some((score, url));
+            // Превращаем "1080p" в число 1080, чтобы yt-dlp не выдал ошибку синтаксиса
+            let numeric_height = parse_quality_height(&quality).unwrap_or(360);
+            format!("best[height<={}][ext=mp4]/best[ext=mp4]/best", numeric_height)
+        };
+
+        let mut attempts: Vec<Option<PathBuf>> = Vec::new();
+        for p in cookie_paths {
+            attempts.push(Some(p));
+        }
+        attempts.push(None);
+
+        let mut last_err = None;
+        for cookie in attempts {
+            let mut cmd = Command::new(&yt_dlp);
+            cmd.arg("-f")
+                .arg(&format_selector)
+                .arg("--get-url")
+                .arg(&url);
+
+            if let Some(ref path) = cookie {
+                cmd.arg("--cookies").arg(path);
             }
-        }
-    }
 
-    fallback_under_or_equal
-        .or(fallback_over_target)
-        .map(|(_, url)| url.to_string())
-}
-
-async fn download_video_to_temp_file(
-    video_id: &str,
-    height: u32,
-    source_url: &str,
-    user_agent: &str,
-    cookie_header: Option<&str>,
-) -> Result<std::path::PathBuf, String> {
-    let temp_dir = env::temp_dir();
-    let final_file_name = format!("yt_api_video_{}_{}p.mp4", video_id, height);
-    let final_path = temp_dir.join(&final_file_name);
-    let partial_path = temp_dir.join(format!("{}.tmp.mp4", final_file_name));
-    let lock_path = temp_dir.join(format!("yt_api_video_{}_{}p.lock", video_id, height));
-
-    if final_path.exists() {
-        return Ok(final_path);
-    }
-
-    let start = std::time::Instant::now();
-    loop {
-        if final_path.exists() {
-            return Ok(final_path);
-        }
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
-        {
-            Ok(_) => break,
-            Err(_) => {
-                let is_stale = if let Ok(meta) = fs::metadata(&lock_path) {
-                    if let Ok(modified) = meta.modified() {
-                        SystemTime::now()
-                            .duration_since(modified)
-                            .unwrap_or(Duration::ZERO)
-                            .as_secs()
-                            > 300
-                    } else {
-                        false
+            match cmd.output() {
+                Ok(output) if output.status.success() => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    if let Some(line) = stdout.lines().find(|l| !l.trim().is_empty()) {
+                        return Ok(line.to_string());
                     }
-                } else {
-                    false
-                };
-                if is_stale {
-                    let _ = fs::remove_file(&lock_path);
-                    continue;
+                    last_err = Some("yt-dlp returned empty output".to_string());
                 }
-                tokio::time::sleep(Duration::from_millis(120)).await;
-                if start.elapsed().as_secs() > 300 {
-                    return Err("Timeout waiting for video predownload lock".to_string());
-                }
-            }
-        }
-    }
-
-    let client = Client::builder()
-        .user_agent(user_agent.to_string())
-        .build()
-        .map_err(|e| e.to_string())?;
-    let result = async {
-        let mut request = client
-            .get(source_url)
-            .header("Referer", "https://www.youtube.com")
-            .header("Origin", "https://www.youtube.com");
-        if let Some(cookie) = cookie_header {
-            request = request.header("Cookie", cookie);
-        }
-        let mut response = request.send().await.map_err(|e| e.to_string())?;
-        if !response.status().is_success() {
-            return Err(format!("Video source HTTP {}", response.status()));
-        }
-
-        let mut file = tokio::fs::File::create(&partial_path)
-            .await
-            .map_err(|e| e.to_string())?;
-        while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
-            file.write_all(&chunk).await.map_err(|e| e.to_string())?;
-        }
-        file.flush().await.map_err(|e| e.to_string())?;
-        tokio::fs::rename(&partial_path, &final_path)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok::<(), String>(())
-    }
-    .await;
-
-    let _ = fs::remove_file(&lock_path);
-    if result.is_err() {
-        let _ = fs::remove_file(&partial_path);
-    }
-    result.map(|_| final_path)
-}
-
-async fn load_youtube_cookie_header_from_browser(use_cookies: bool) -> Option<String> {
-    if !use_cookies {
-        return None;
-    }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_secs();
-    {
-        let cache = BROWSER_COOKIE_CACHE.lock().await;
-        if let Some((cookie, ts)) = cache.as_ref() {
-            if now.saturating_sub(*ts) <= COOKIE_CACHE_TTL {
-                return Some(cookie.clone());
-            }
-        }
-    }
-    let options = GetCookiesOptions {
-        url: "https://www.youtube.com/".to_string(),
-        origins: None,
-        names: None,
-        browsers: Some(vec![BrowserName::Chrome, BrowserName::Edge, BrowserName::Firefox]),
-        profile: None,
-        chrome_profile: None,
-        edge_profile: None,
-        firefox_profile: None,
-        safari_cookies_file: None,
-        include_expired: Some(false),
-        timeout_ms: Some(7000),
-        debug: Some(false),
-        mode: None,
-        inline_cookies_file: None,
-        inline_cookies_json: None,
-        inline_cookies_base64: None,
-    };
-    let result = get_cookies(options).await;
-    if !result.warnings.is_empty() {
-        log::warn!("Browser cookies warnings: {}", result.warnings.join(" | "));
-    }
-    if result.cookies.is_empty() {
-        None
-    } else {
-        let header = to_cookie_header(&result.cookies, &Default::default());
-        if header.trim().is_empty() {
-            None
-        } else {
-            let mut cache = BROWSER_COOKIE_CACHE.lock().await;
-            *cache = Some((header.clone(), now));
-            Some(header)
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct SelectedVideoStreams {
-    video_url: String,
-    audio_url: Option<String>,
-}
-
-fn select_video_streams_for_quality(data: &Value, target_height: Option<u32>) -> Option<SelectedVideoStreams> {
-    let video_url = select_best_video_url_from_player_response(data, target_height)?;
-    let audio_url = select_best_audio_url_from_player_response(data);
-    Some(SelectedVideoStreams { video_url, audio_url })
-}
-
-async fn mux_video_audio_to_temp_file(
-    video_id: &str,
-    height: u32,
-    video_url: &str,
-    audio_url: &str,
-    user_agent: &str,
-    cookie_header: Option<&str>,
-) -> Result<std::path::PathBuf, String> {
-    let temp_dir = env::temp_dir();
-    let final_file_name = format!("yt_api_video_{}_{}p.mp4", video_id, height);
-    let final_path = temp_dir.join(&final_file_name);
-    let partial_path = temp_dir.join(format!("{}.part", final_file_name));
-    let lock_path = temp_dir.join(format!("yt_api_video_{}_{}p.lock", video_id, height));
-
-    if final_path.exists() {
-        return Ok(final_path);
-    }
-
-    let start = std::time::Instant::now();
-    loop {
-        if final_path.exists() {
-            return Ok(final_path);
-        }
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
-        {
-            Ok(_) => break,
-            Err(_) => {
-                let is_stale = if let Ok(meta) = fs::metadata(&lock_path) {
-                    if let Ok(modified) = meta.modified() {
-                        SystemTime::now()
-                            .duration_since(modified)
-                            .unwrap_or(Duration::ZERO)
-                            .as_secs()
-                            > 300
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let msg = if let Some(ref path) = cookie {
+                        format!(
+                            "yt-dlp failed with cookies {}: status {} stderr {}",
+                            path.display(),
+                            output.status,
+                            stderr
+                        )
                     } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-                if is_stale {
-                    let _ = fs::remove_file(&lock_path);
-                    continue;
+                        format!(
+                            "yt-dlp failed without cookies: status {} stderr {}",
+                            output.status, stderr
+                        )
+                    };
+                    log::info!("{}", msg);
+                    last_err = Some(msg);
                 }
-                tokio::time::sleep(Duration::from_millis(120)).await;
-                if start.elapsed().as_secs() > 300 {
-                    return Err("Timeout waiting for video mux lock".to_string());
+                Err(e) => {
+                    let msg = if let Some(ref path) = cookie {
+                        format!("yt-dlp exec error with cookies {}: {}", path.display(), e)
+                    } else {
+                        format!("yt-dlp exec error: {}", e)
+                    };
+                    log::info!("{}", msg);
+                    last_err = Some(msg);
                 }
             }
         }
-    }
 
-    let ffmpeg = ffmpeg_binary();
-    let output = partial_path.to_string_lossy().to_string();
-    let video = video_url.to_string();
-    let audio = audio_url.to_string();
-    let ua = user_agent.to_string();
-    let cookie = cookie_header.map(|s| s.to_string());
-
-    let status = task::spawn_blocking(move || {
-        let mut common_headers = "Referer: https://www.youtube.com\r\nOrigin: https://www.youtube.com\r\n".to_string();
-        if let Some(cookie_value) = cookie.as_deref() {
-            common_headers.push_str(&format!("Cookie: {}\r\n", cookie_value));
-        }
-        Command::new(&ffmpeg)
-            .args([
-                "-nostdin",
-                "-y",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-user_agent",
-                &ua,
-                "-headers",
-                &common_headers,
-                "-i",
-                &video,
-                "-user_agent",
-                &ua,
-                "-headers",
-                &common_headers,
-                "-i",
-                &audio,
-                "-map",
-                "0:v:0",
-                "-map",
-                "1:a:0",
-                "-c:v",
-                "copy",
-                "-c:a",
-                "copy",
-                "-movflags",
-                "+faststart",
-                "-f",
-                "mp4",
-                &output,
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|e| format!("Failed to run ffmpeg: {}", e))
+        Err(last_err.unwrap_or_else(|| "yt-dlp failed for all attempts".to_string()))
     })
     .await
-    .map_err(|e| format!("ffmpeg task join error: {}", e))?;
-
-    let result = match status {
-        Ok(out) if out.status.success() => {
-            tokio::fs::rename(&partial_path, &final_path)
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(final_path)
-        }
-        Ok(out) => Err(format!(
-            "ffmpeg mux failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        )),
-        Err(e) => Err(e),
-    };
-
-    let _ = fs::remove_file(&lock_path);
-    if result.is_err() {
-        let _ = fs::remove_file(&partial_path);
-    }
-    result
+    .map_err(|e| e.to_string())?
 }
 
 async fn proxy_stream_response(
@@ -1466,7 +1397,6 @@ pub struct VideoInfoResponse {
     pub duration: String,
     pub published_at: String,
     pub likes: Option<String>,
-    pub dislikes: Option<String>,
     pub views: Option<String>,
     pub comment_count: Option<String>,
     pub comments: Vec<Comment>,
@@ -1797,95 +1727,114 @@ pub async fn get_ytvideo_info(
     };
 
     let client = Client::new();
-
-    // Speed-up: avoid fetching the watch HTML page; fetch Innertube /player + /next in parallel.
-    let user_agent = config.get_innertube_user_agent();
-    let cookie_header = load_youtube_cookie_header_from_browser(config.video.use_cookies).await;
-    let next_url = format!("https://www.youtube.com/youtubei/v1/next?key={}", innertube_key);
-    let ctx = serde_json::json!({
-        "client": {
-            "clientName": "WEB",
-            "clientVersion": "2.20260220.00.00",
-            "hl": "en",
-            "gl": "US"
+    
+    let video_url = format!("https://www.youtube.com/watch?v={}", video_id);
+    
+    let html = match client.get(&video_url).send().await {
+        Ok(resp) => match resp.text().await {
+            Ok(text) => text,
+            Err(e) => {
+                log::info!("Error fetching video page: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": "Failed to fetch video page"
+                }));
+            }
+        },
+        Err(e) => {
+            log::info!("Error fetching video page: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to fetch video page"
+            }));
         }
+    };
+    
+    let cfg = extract_ytcfg(&html);
+    let pr = extract_initial_player_response(&html);
+    let api_key = cfg.get("INNERTUBE_API_KEY").and_then(|v| v.as_str()).unwrap_or(innertube_key);
+    let mut ctx = cfg.get("INNERTUBE_CONTEXT").cloned().unwrap_or_else(|| {
+        serde_json::json!({
+            "client": {
+                "clientName": "WEB",
+                "clientVersion": "2.20250101"
+            }
+        })
     });
+    
+    if let Some(client) = ctx.get_mut("client").and_then(|c| c.as_object_mut()) {
+        client.insert("gl".to_string(), serde_json::Value::String("US".to_string())); // Set region to USA
+        client.insert("hl".to_string(), serde_json::Value::String("en-US".to_string())); // Set language to English (USA)
+    }
+    
     let next_payload = serde_json::json!({
         "context": ctx,
         "videoId": video_id
     });
-
-    let next_fut = async {
-        let mut request = client
-            .post(&next_url)
-            .header("User-Agent", &user_agent)
-            .header("Accept-Language", "en-US,en;q=0.9")
-            .header("Content-Type", "application/json");
-        if let Some(cookie) = cookie_header.as_deref() {
-            request = request.header("Cookie", cookie);
-        }
-        match request.json(&next_payload).send().await {
-            Ok(resp) => resp.json::<serde_json::Value>().await.unwrap_or(serde_json::Value::Null),
-            Err(_) => serde_json::Value::Null,
-        }
-    };
-
-    let (player_response, next_data) = tokio::join!(
-        fetch_player_response(&video_id, config),
-        next_fut
-    );
-
-    let pr = match player_response {
-        Ok(v) => v,
+    
+    let next_url = format!("https://www.youtube.com/youtubei/v1/next?key={}", api_key);
+    
+    let next_data = match client
+        .post(&next_url)
+        .header("Content-Type", "application/json")
+        .json(&next_payload)
+        .send()
+        .await
+    {
+        Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(data) => data,
+            Err(e) => {
+                log::info!("Error parsing next response: {}", e);
+                serde_json::Value::Null
+            }
+        },
         Err(e) => {
-            log::info!("Error calling player endpoint: {}", e);
+            log::info!("Error calling next endpoint: {}", e);
             serde_json::Value::Null
         }
     };
-
-    // Comments: most real comment payloads arrive via a continuation token.
-    // We still keep this bounded (single request, short timeout) to avoid big latency spikes.
-    let mut comments = extract_comments(&next_data, base_trimmed);
-    if comments.is_empty() {
-        if let Some(token) = get_comments_token(&next_data) {
-            let cont_payload = serde_json::json!({
-                "context": ctx,
-                "continuation": token
-            });
-
-            let cont_resp = {
-                let mut request = client
-                    .post(&next_url)
-                    .header("User-Agent", &user_agent)
-                    .header("Accept-Language", "en-US,en;q=0.9")
-                    .header("Content-Type", "application/json")
-                    .timeout(Duration::from_secs(8));
-                if let Some(cookie) = cookie_header.as_deref() {
-                    request = request.header("Cookie", cookie);
+    
+    let comments_token = get_comments_token(&next_data);
+    let mut cont_resp = serde_json::Value::Null;
+    
+    if let Some(token) = comments_token {
+        let cont_payload = serde_json::json!({
+            "context": ctx,
+            "continuation": token
+        });
+        
+        cont_resp = match client
+            .post(&next_url)
+            .header("Content-Type", "application/json")
+            .json(&cont_payload)
+            .send()
+            .await
+        {
+            Ok(resp) => match resp.json::<serde_json::Value>().await {
+                Ok(data) => data,
+                Err(e) => {
+                    log::info!("Error parsing continuation response: {}", e);
+                    serde_json::Value::Null
                 }
-                match request.json(&cont_payload).send().await {
-                    Ok(resp) => resp.json::<serde_json::Value>().await.unwrap_or(serde_json::Value::Null),
-                    Err(e) => {
-                        log::info!("Error calling comments continuation: {}", e);
-                        serde_json::Value::Null
-                    }
-                }
-            };
-
-            if !cont_resp.is_null() {
-                comments = extract_comments(&cont_resp, base_trimmed);
+            },
+            Err(e) => {
+                log::info!("Error calling continuation endpoint: {}", e);
+                serde_json::Value::Null
             }
-        }
+        };
     }
-
+    
     let vd = pr.get("videoDetails").unwrap_or(&serde_json::Value::Null);
     let micro = pr
         .get("microformat")
         .and_then(|m| m.get("playerMicroformatRenderer"))
         .unwrap_or(&serde_json::Value::Null);
     
+    let comments = if !cont_resp.is_null() {
+        extract_comments(&cont_resp, base_trimmed)
+    } else {
+        extract_comments(&next_data, base_trimmed)
+    };
+    
     let likes = find_likes(&next_data);
-    let dislikes = find_dislikes(&next_data);
     
     let comm_cnt = find_comments_count(&pr, &next_data);
     let subscriber_count = find_subscriber_count(&next_data);
@@ -2028,11 +1977,6 @@ pub async fn get_ytvideo_info(
         duration,
         published_at,
         likes: if !likes.is_empty() { Some(likes) } else { None },
-        dislikes: if !dislikes.is_empty() {
-            Some(dislikes)
-        } else {
-            None
-        },
         views: if !views.is_empty() { Some(views) } else { None },
         comment_count: if !comm_cnt.is_empty() { 
             Some(comm_cnt) 
@@ -2369,14 +2313,48 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
         }
     };
 
-    // 1. Старые кодеки отключены: конвертация через ffmpeg убрана.
+    // 1. Старые кодеки (всегда конвертация на лету)
     let codec = query_params.get("codec").map(|c| c.as_str());
-    if codec.is_some() {
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "codec conversion is disabled",
-            "details": "This build serves videos without ffmpeg transcoding"
-        }));
-    }
+	if let Some(codec_str) = codec {
+		if codec_str != "mpeg4" && codec_str != "h263" {
+			return HttpResponse::BadRequest().json(serde_json::json!({
+				"error": "Unsupported codec",
+				"details": format!("Codec '{}' is not supported. Available: mpeg4, h263", codec_str),
+				"supported_codecs":["mpeg4", "h263"]
+			}));
+		}
+
+        // Get video duration and check if it's longer than 40 minutes
+        let player_response = match fetch_player_response(&video_id, &data.config).await {
+            Ok(data) => data,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": "Failed to fetch player response",
+                    "details": e
+                }));
+            }
+        };
+        let duration_seconds = get_duration_from_player_response(&player_response);
+        if duration_seconds > 3300 {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Video too long for conversion",
+                "details": format!("Video duration ({}s) exceeds 55 minutes limit", duration_seconds)
+            }));
+        }
+
+		let direct_url = match resolve_direct_stream_url(&video_id, Some("360"), false, &data.config).await {
+			Ok(url) => url,
+			Err(e) => {
+				return HttpResponse::InternalServerError().json(serde_json::json!({
+					"error": "Failed to resolve video url for conversion",
+					"details": e
+				}));
+			}
+		};
+		let user_agent = data.config.get_innertube_user_agent();
+		let permit = data.codec_semaphore.clone().acquire_owned().await.ok();
+		return stream_converted_video(&direct_url, &user_agent, &video_id, codec_str, permit);
+	}
 
     // 2. HLS
     let hls_only = query_params.get("hls").map(|v| v == "true").unwrap_or(false);
@@ -2418,7 +2396,6 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
     let mut target_height = requested_quality
         .and_then(|q| parse_quality_height(q))
         .unwrap_or_else(|| parse_quality_height(&data.config.video.default_quality).unwrap_or(360));
-    let cookie_header = load_youtube_cookie_header_from_browser(data.config.video.use_cookies).await;
 
     // --- ЛОГИКА КАЧЕСТВА ---
 
@@ -2428,20 +2405,51 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
         target_height = 360;
     }
 
-    // 2. Подбираем потоки как в логике yt-dlp: видео по quality + лучший аудио.
-    let selected_streams = match select_video_streams_for_quality(&player_response, Some(target_height)) {
-        Some(streams) => streams,
+    // 2. Короткие видео (< 30 мин) и высокое качество -> Скачиваем целиком на сервер
+    // 2. Короткие видео (< 30 мин) и высокое качество -> Скачиваем целиком на сервер
+    // 2. Короткие видео (< 30 мин) и высокое качество -> Скачиваем целиком на сервер
+    if target_height > 360 && use_proxy {
+        log::info!("Short video ({}s) in {}p. Downloading full file via yt-dlp...", duration_seconds, target_height);
+        
+        // Теперь здесь создастся файл вида yt_api_video_ID_1080p.mp4
+        match download_mux_to_temp_file(video_id.clone(), target_height).await {
+            Ok(path) => {
+                log::info!("Download complete: {}. Serving file.", path.display());
+                return serve_mp4_from_cache(&path, &req, Some(duration_seconds));
+            },
+            Err(e) => {
+                 log::error!("Failed to download/mux video: {}", e);
+                 return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": "Failed to prepare video file",
+                    "details": e
+                }));
+            }
+        }
+    }
+
+    // 3. Fallback или 360p -> Прямая ссылка
+    // Сюда попадаем, если качество <= 360
+    let direct_url = get_direct_stream_url_from_player_response(&player_response);
+    
+    let final_url = match direct_url {
+        Some(u) => u,
         None => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to resolve video url",
-                "details": "No direct stream URLs in Innertube response"
-            }));
+             log::warn!("Falling back to yt-dlp for direct URL");
+             match resolve_direct_stream_url(&video_id, Some("360"), false, &data.config).await {
+                Ok(url) => url,
+                Err(e) => {
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": "Failed to resolve video url",
+                        "details": e
+                    }));
+                }
+             }
         }
     };
 
     if req.method() == actix_web::http::Method::HEAD {
         let client = Client::new();
-        match client.head(&selected_streams.video_url).send().await {
+        match client.head(&final_url).send().await {
             Ok(resp) => {
                 let mut builder = HttpResponse::build(resp.status());
                 if let Some(len) = resp.headers().get(CONTENT_LENGTH) {
@@ -2455,43 +2463,12 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
             }
             Err(_) => HttpResponse::Ok().finish(),
         }
-    } else if use_proxy {
-        let user_agent = data.config.get_innertube_user_agent();
-        let prepared_file = if let Some(audio_url) = selected_streams.audio_url.as_deref() {
-            mux_video_audio_to_temp_file(
-                &video_id,
-                target_height,
-                &selected_streams.video_url,
-                audio_url,
-                &user_agent,
-                cookie_header.as_deref(),
-            )
-            .await
-        } else {
-            download_video_to_temp_file(
-                &video_id,
-                target_height,
-                &selected_streams.video_url,
-                &user_agent,
-                cookie_header.as_deref(),
-            )
-            .await
-        };
-        match prepared_file {
-            Ok(path) => serve_mp4_from_cache(&path, &req, Some(duration_seconds)),
-            Err(e) => {
-                HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": "Failed to download video before streaming",
-                    "details": e
-                }))
-            }
-        }
     } else if !use_proxy {
         HttpResponse::Found()
-            .insert_header((LOCATION, selected_streams.video_url))
+            .insert_header((LOCATION, final_url))
             .finish()
     } else {
-        HttpResponse::InternalServerError().finish()
+        proxy_stream_response(&final_url, &req, "video/mp4").await
     }
 }
 
@@ -2921,25 +2898,11 @@ async fn fetch_player_response(
     video_id: &str,
     config: &crate::config::Config,
 ) -> Result<Value, String> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_secs();
-    {
-        let mut cache = PLAYER_RESPONSE_CACHE.lock().await;
-        if let Some((cached, ts)) = cache.get(video_id) {
-            if now.saturating_sub(*ts) <= PLAYER_CACHE_TTL {
-                return Ok(cached.clone());
-            }
-            let _ = cache.pop(video_id);
-        }
-    }
     let api_key = config
         .get_innertube_key()
         .ok_or("innertube api key не задан в config.yml (api.innertube.key)")?;
     let client = Client::new();
     let user_agent = config.get_innertube_user_agent();
-    let cookie_header = load_youtube_cookie_header_from_browser(config.video.use_cookies).await;
     let player_client = config.get_innertube_player_client();
     let json_data = serde_json::json!({
         "context": {
@@ -2948,15 +2911,11 @@ async fn fetch_player_response(
         "videoId": video_id
     });
     let url = format!("https://www.youtube.com/youtubei/v1/player?key={}", api_key);
-    let mut request = client
+    let resp = client
         .post(&url)
         .header("User-Agent", &user_agent)
         .header("Accept-Language", "en-US,en;q=0.9")
-        .header("Content-Type", "application/json");
-    if let Some(cookie) = cookie_header.as_deref() {
-        request = request.header("Cookie", cookie);
-    }
-    let resp = request
+        .header("Content-Type", "application/json")
         .json(&json_data)
         .send()
         .await
@@ -2964,12 +2923,7 @@ async fn fetch_player_response(
     if !resp.status().is_success() {
         return Err(format!("player API HTTP {}", resp.status()));
     }
-    let json = resp.json::<Value>().await.map_err(|e| e.to_string())?;
-    {
-        let mut cache = PLAYER_RESPONSE_CACHE.lock().await;
-        cache.put(video_id.to_string(), (json.clone(), now));
-    }
-    Ok(json)
+    resp.json::<Value>().await.map_err(|e| e.to_string())
 }
 
 async fn get_hls_manifest_url(video_id: &str, config: &crate::config::Config) -> Result<String, String> {
@@ -3017,7 +2971,27 @@ fn get_hls_manifest_url_from_player(data: &Value) -> Result<String, String> {
 }
 
 fn get_direct_stream_url_from_player_response(data: &Value) -> Option<String> {
-    select_best_video_url_from_player_response(data, None)
+    let streaming = data.get("streamingData")?;
+    let mut best: Option<(u32, &str)> = None;
+    for key in &["formats", "adaptiveFormats"] {
+        let arr = streaming.get(*key)?.as_array()?;
+        for f in arr {
+            let url = f.get("url").and_then(|v| v.as_str())?;
+            let label = f.get("qualityLabel").and_then(|v| v.as_str()).unwrap_or("");
+            let height: u32 = label.trim_end_matches('p').parse().unwrap_or(0);
+            if *key == "adaptiveFormats" && height == 0 {
+                continue;
+            }
+            let replace = match best {
+                None => true,
+                Some((h, _)) => height > h,
+            };
+            if replace {
+                best = Some((height, url));
+            }
+        }
+    }
+    best.map(|(_, u)| u.to_string())
 }
 
 fn serve_mp4_from_cache(

@@ -16,44 +16,26 @@ fn base_url(req: &HttpRequest, config: &crate::config::Config) -> String {
 }
 
 fn parse_number(text: &str) -> String {
-    // Handles:
-    // - "92.7K subscribers" -> 92700
-    // - "92,7K subscribers" -> 92700 (comma decimal)
-    // - "1,234 subscribers" -> 1234 (comma thousands)
-    // - "92,7 тыс. подписчиков" / "92.7 тыс подписчиков" -> 92700
-    // - "1,2 млн подписчиков" -> 1200000
-    let s = text.trim().to_lowercase();
-
-    let multiplier = if s.contains("млн") || s.contains('m') {
-        1_000_000.0
-    } else if s.contains("тыс") || s.contains('k') {
-        1_000.0
-    } else if s.contains('b') {
-        1_000_000_000.0
+    let lower_text = text.trim().to_lowercase();
+    let mut multiplier = 1.0;
+    let clean_text = if lower_text.contains('k') {
+        multiplier = 1000.0;
+        lower_text.replace('k', "")
+    } else if lower_text.contains('m') {
+        multiplier = 1000000.0;
+        lower_text.replace('m', "")
+    } else if lower_text.contains('b') {
+        multiplier = 1000000000.0;
+        lower_text.replace('b', "")
     } else {
-        1.0
+        lower_text
     };
-
-    // Find the first "number-like" token.
-    let re = regex::Regex::new(r"(\d[\d\s\.,]*)").unwrap();
-    let Some(cap) = re.captures(&s) else {
-        return "0".to_string();
-    };
-    let mut num = cap.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
-    num.retain(|c| c.is_ascii_digit() || c == '.' || c == ',' || c == ' ');
-    num = num.replace(' ', "");
-
-    // Normalize separators:
-    // - if both '.' and ',' exist => assume ',' is thousands separator; drop commas
-    // - else if only ',' exists => treat as decimal separator; replace with '.'
-    if num.contains('.') && num.contains(',') {
-        num = num.replace(',', "");
-    } else if num.contains(',') && !num.contains('.') {
-        num = num.replace(',', ".");
-    }
-
-    match num.parse::<f64>() {
-        Ok(v) => ((v * multiplier).round() as u64).to_string(),
+    
+    // Extract digits and decimal points
+    let num_str: String = clean_text.chars().filter(|c| c.is_ascii_digit() || *c == '.').collect();
+    
+    match num_str.parse::<f64>() {
+        Ok(num) => ((num * multiplier) as u64).to_string(),
         Err(_) => "0".to_string(),
     }
 }
