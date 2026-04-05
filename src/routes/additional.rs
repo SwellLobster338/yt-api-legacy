@@ -903,10 +903,27 @@ pub async fn get_subscriptions_session(
 ) -> impl Responder {
     let base = base_url(&req, &data.config);
     let base_trimmed = base.trim_end_matches('/');
-    let refresh_token = req
-        .cookie("session_id")
-        .and_then(|c| token_store.get_token(c.value()))
-        .filter(|t| !t.is_empty() && !t.starts_with("Error"));
+    
+    // Try to get refresh token from query parameter first (for old IE compatibility)
+    let mut query_params: HashMap<String, String> = HashMap::new();
+    for pair in req.query_string().split('&') {
+        let mut parts = pair.split('=');
+        if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
+            query_params.insert(key.to_string(), value.to_string());
+        }
+    }
+    
+    let refresh_token = if let Some(token) = query_params.get("token") {
+        // Token provided via query parameter
+        Some(token.clone())
+    } else {
+        // Fallback to cookie
+        req
+            .cookie("session_id")
+            .and_then(|c| token_store.get_token(c.value()))
+            .filter(|t| !t.is_empty() && !t.starts_with("Error"))
+    };
+    
     let subscriptions = match refresh_token {
         Some(ref token) => {
             fetch_subscriptions_for_token(token, &auth_config, &data.config, base_trimmed).await

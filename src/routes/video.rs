@@ -1393,6 +1393,9 @@ pub struct VideoInfoResponse {
     pub channel_custom_url: Option<String>,
     pub description: String,
     pub video_id: String,
+    /// Raw duration in seconds when available (for HTML5 player config).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length_seconds: Option<u64>,
     pub embed_url: String,
     pub duration: String,
     pub published_at: String,
@@ -1932,12 +1935,12 @@ pub async fn get_ytvideo_info(
         channel_id = vd.get("channelId").and_then(|c| c.as_str()).unwrap_or("").to_string();
     }
     
-    let duration = if let Some(length_seconds) = vd.get("lengthSeconds").and_then(|l| l.as_str()) {
-        if let Ok(seconds) = length_seconds.parse::<u64>() {
-            format!("PT{}M{}S", seconds / 60, seconds % 60)
-        } else {
-            String::new()
-        }
+    let length_seconds: Option<u64> = vd
+        .get("lengthSeconds")
+        .and_then(|l| l.as_u64().or_else(|| l.as_str().and_then(|s| s.parse().ok())));
+
+    let duration = if let Some(sec) = length_seconds {
+        format!("PT{}M{}S", sec / 60, sec % 60)
     } else {
         String::new()
     };
@@ -1967,6 +1970,7 @@ pub async fn get_ytvideo_info(
         subscriber_count,
         description,
         video_id: video_id.clone(),
+        length_seconds,
         channel_custom_url: micro
             .get("ownerProfileUrl")
             .and_then(|url| url.as_str())

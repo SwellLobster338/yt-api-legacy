@@ -4,6 +4,7 @@
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use html_escape::encode_text;
 use serde::Deserialize;
+use serde_json::{json, Value};
 use std::fs;
 
 use crate::config::Config;
@@ -55,6 +56,138 @@ async fn fetch_json<T: for<'de> Deserialize<'de>>(
 
 fn h(s: &str) -> String {
     encode_text(s).to_string()
+}
+
+// ---- Legacy HTML5 player (ytplayer.config + url_encoded_fmt_stream_map → /direct_url) ----
+
+/// `quality`: empty or `"auto"` → no `quality=` query param (server default).
+fn yt_legacy_direct_url(base_trimmed: &str, video_id: &str, quality: &str) -> String {
+    let base = base_trimmed.trim_end_matches('/');
+    let mut s = format!(
+        "{}/direct_url?video_id={}",
+        base,
+        urlencoding::encode(video_id)
+    );
+    let q = quality.trim();
+    if !q.is_empty() && q != "auto" {
+        s.push_str(&format!("&quality={}", urlencoding::encode(q)));
+    }
+    s
+}
+
+/// Initial progressive formats: same URL (no `quality` param) so default load matches /direct_url?video_id= only.
+fn yt_legacy_url_encoded_fmt_stream_map(base_trimmed: &str, video_id: &str) -> String {
+    let url = yt_legacy_direct_url(base_trimmed, video_id, "");
+    let enc = urlencoding::encode(&url);
+    format!(
+        "url={}&itag=22&type=video%2Fmp4&sig=s0,url={}&itag=18&type=video%2Fmp4&sig=s1",
+        enc, enc
+    )
+}
+
+fn yt_legacy_ytplayer_config(
+    video_id: &str,
+    title: &str,
+    length_seconds: u64,
+    stream_map: &str,
+    loader_url: &str,
+) -> Value {
+    json!({
+        "args": {
+            "video_id": video_id,
+            "title": title,
+            "length_seconds": length_seconds,
+            "loaderUrl": loader_url,
+            "url_encoded_fmt_stream_map": stream_map,
+            "adaptive_fmts": "",
+            "dash": "0",
+            "vq": "auto",
+            "enablejsapi": 1,
+            "ssl": 1,
+            "hl": "en_US",
+            "c": "WEB",
+            "fmt_list": "43/640x360/99/0/0,18/640x360/9/0/115,5/320x240/7/0/0",
+            "show_content_thumbnail": true,
+            "host_language": "en",
+            "enablesizebutton": 1,
+            "autoplay": "1",
+        },
+        "params": {
+            "allowscriptaccess": "always",
+            "allowfullscreen": "true",
+            "bgcolor": "#000000"
+        },
+        "attrs": { "id": "movie_player" },
+        "sts": 16241,
+        "url": "",
+        "min_version": "8.0.0",
+        "html5": true,
+        "assets": {
+            "html": "/html5_player_template",
+            "css": "/assets/css/www-player-webp-vflNjHGsU.css",
+            "js": "/assets/js/html5player-en_US-vfl19qQQ_.js"
+        }
+    })
+}
+
+fn escape_json_for_html_script(s: &str) -> String {
+    s.replace("</script>", "<\\/script>")
+        .replace("</Script>", "<\\/Script>")
+}
+
+fn yt_legacy_player_init_script(config_json: &str) -> String {
+    format!(
+        r#"<script type="application/json" id="yt-legacy-player-config">{0}</script>
+<script>
+(function () {{
+  var el = document.getElementById("yt-legacy-player-config");
+  if (!el) return;
+  var ytplayer = window.ytplayer || (window.ytplayer = {{}});
+  ytplayer.config = JSON.parse(el.textContent);
+  el.parentNode.removeChild(el);
+  window.__YT_LEGACY_BASE__ = (document.documentElement.getAttribute("data-main-url") || "").trim();
+  window.__YT_LEGACY_VIDEO_ID__ = (document.documentElement.getAttribute("data-video-id") || "").trim();
+  window.__YT_LEGACY_MAIN_URL__ = window.__YT_LEGACY_BASE__;
+  try {{
+    window.__YT_LEGACY_TEMPLATE_CONFIG__ = JSON.parse(JSON.stringify(ytplayer.config));
+  }} catch (e) {{
+    window.__YT_LEGACY_TEMPLATE_CONFIG__ = ytplayer.config;
+  }}
+  if (window.yt && window.yt.player && window.yt.player.Application) {{
+    window.yt.player.Application.create("player-api", ytplayer.config);
+    ytplayer.config.loaded = true;
+  }}
+  /* Stock player sometimes stays unstarted until a second interaction; nudge play after media is ready */
+  (function legacyPlaybackKick() {{
+    function tryPlay() {{
+      var root = document.getElementById("movie_player");
+      if (!root) return;
+      var v = root.getElementsByTagName("video")[0];
+      if (!v) return;
+      function kick() {{
+        if (v.error) return;
+        var p = v.play();
+        if (p && p.catch) p.catch(function () {{}});
+      }}
+      if (v.readyState >= 2) kick();
+      else {{
+        function once() {{
+          v.removeEventListener("canplay", once);
+          v.removeEventListener("loadeddata", once);
+          kick();
+        }}
+        v.addEventListener("canplay", once);
+        v.addEventListener("loadeddata", once);
+      }}
+    }}
+    window.setTimeout(tryPlay, 0);
+    window.setTimeout(tryPlay, 250);
+    window.setTimeout(tryPlay, 800);
+  }})();
+}})();
+</script>"#,
+        config_json
+    )
 }
 
 fn make_clickable(text: &str) -> String {
@@ -824,20 +957,23 @@ pub async fn page_watch(
     let comment_count = info.comment_count.as_deref().unwrap_or("0");
     let comments = &info.comments;
 
-    let video_src = if base_trimmed.is_empty() {
-        format!("/direct_url?video_id={}", urlencoding::encode(&video_id))
-    } else {
-        format!(
-            "{}/direct_url?video_id={}",
-            base_trimmed,
-            urlencoding::encode(&video_id)
-        )
-    };
-    let poster = if base_trimmed.is_empty() {
-        format!("/thumbnail/{}", urlencoding::encode(&video_id))
-    } else {
-        format!("{}/thumbnail/{}", base_trimmed, urlencoding::encode(&video_id))
-    };
+    let stream_map = yt_legacy_url_encoded_fmt_stream_map(base_trimmed, &video_id);
+    let loader_watch = format!(
+        "{}/watch?v={}",
+        main_url.trim_end_matches('/'),
+        urlencoding::encode(&video_id)
+    );
+    let len_sec = info.length_seconds.unwrap_or(0);
+    let yt_cfg = yt_legacy_ytplayer_config(
+        &video_id,
+        title,
+        len_sec,
+        &stream_map,
+        &loader_watch,
+    );
+    let yt_cfg_str = serde_json::to_string(&yt_cfg).unwrap_or_else(|_| "{}".to_string());
+    let yt_cfg_str = escape_json_for_html_script(&yt_cfg_str);
+    let ytplayer_init = yt_legacy_player_init_script(&yt_cfg_str);
 
     let navbar = render_navbar(&main_url, "");
     let related_html = if related.is_empty() {
@@ -855,7 +991,9 @@ pub async fn page_watch(
     let html = t
         .replace("{{NAVBAR}}", &navbar)
         .replace("{{MAIN_URL}}", &main_url)
+        .replace("{{MAIN_URL_ATTR}}", &h(&main_url))
         .replace("{{VIDEO_ID}}", &h(&video_id))
+        .replace("{{VIDEO_ID_ATTR}}", &h(&video_id))
         .replace("{{PAGE_TITLE}}", &format!("{} - YouTube", h(title)))
         .replace("{{VIDEO_TITLE}}", &h(title))
         .replace("{{CHANNEL_LINK}}", &channel_link)
@@ -871,8 +1009,7 @@ pub async fn page_watch(
         .replace("{{COMMENT_COUNT}}", comment_count)
         .replace("{{COMMENTS_HTML}}", &comments_html)
         .replace("{{RELATED_VIDEOS}}", &related_html)
-        .replace("{{VIDEO_SRC}}", &h(&video_src))
-        .replace("{{POSTER}}", &h(&poster));
+        .replace("{{YTPLAYER_INIT}}", &ytplayer_init);
 
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
@@ -1159,16 +1296,42 @@ pub async fn page_embed(
     }
     let config = &data.config;
     let base = base_url(&req, config);
-    let video_src = format!(
-        "{}/direct_url?video_id={}",
-        base.trim_end_matches('/'),
+    let base_trim = base.trim_end_matches('/');
+    let stream_map = yt_legacy_url_encoded_fmt_stream_map(base_trim, &video_id);
+    let loader_embed = format!(
+        "{}/embed/{}",
+        base_trim,
         urlencoding::encode(&video_id)
     );
-    let poster = format!("{}/thumbnail/{}", base.trim_end_matches('/'), urlencoding::encode(&video_id));
+    let (embed_title, len_sec) = match fetch_json::<VideoInfoResponse>(
+        &base,
+        &format!("/get-ytvideo-info.php?video_id={}", urlencoding::encode(&video_id)),
+    )
+    .await
+    {
+        Ok(i) => (
+            i.title,
+            i.length_seconds.unwrap_or(0),
+        ),
+        Err(_) => ("Video".to_string(), 0u64),
+    };
+    let yt_cfg = yt_legacy_ytplayer_config(
+        &video_id,
+        embed_title.as_str(),
+        len_sec,
+        &stream_map,
+        &loader_embed,
+    );
+    let yt_cfg_str = serde_json::to_string(&yt_cfg).unwrap_or_else(|_| "{}".to_string());
+    let yt_cfg_str = escape_json_for_html_script(&yt_cfg_str);
+    let ytplayer_init = yt_legacy_player_init_script(&yt_cfg_str);
     let t = load_template("embed");
     let html = t
-        .replace("{{VIDEO_SRC}}", &h(&video_src))
-        .replace("{{POSTER}}", &h(&poster));
+        .replace("{{MAIN_URL}}", &base)
+        .replace("{{MAIN_URL_ATTR}}", &h(&base))
+        .replace("{{VIDEO_ID}}", &h(&video_id))
+        .replace("{{VIDEO_ID_ATTR}}", &h(&video_id))
+        .replace("{{YTPLAYER_INIT}}", &ytplayer_init);
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
         .body(html)
