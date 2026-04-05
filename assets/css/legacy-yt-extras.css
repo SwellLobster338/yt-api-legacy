@@ -1,0 +1,178 @@
+/* Watch page: player column layout */
+#watch7-main-container #player {
+  position: relative;
+}
+#watch7-main .player-width {
+  max-width: 100%;
+}
+#player-mole-container {
+  position: relative;
+}
+
+/* Watch: video stage fills the 640×390 (or theater) box — stock player uses %; reinforce for odd layouts */
+#player-api .html5-video-player,
+#player-api #movie_player.html5-video-player {
+  width: 100%;
+  height: 100%;
+  min-height: 100%;
+  box-sizing: border-box;
+}
+#player-api .html5-video-container,
+#player-api .html5-main-video,
+#player-api video.html5-main-video {
+  width: 100% !important;
+  height: 100% !important;
+  box-sizing: border-box;
+}
+#player-api video.html5-main-video {
+  object-fit: contain;
+}
+
+/* Embed page only: stock CSS fixes .player-width/.player-height to 640×390 — fill iframe / full window */
+body:not(.watch-page) .watch-embed-mode#player,
+body:not(.watch-page) .watch-embed-mode #player-mole-container,
+body:not(.watch-page) .watch-embed-mode #player-api {
+  width: 100% !important;
+  height: 100% !important;
+  max-width: none !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+  float: none !important;
+}
+body:not(.watch-page) .watch-embed-mode .player-width,
+body:not(.watch-page) .watch-embed-mode .player-height {
+  width: 100% !important;
+  height: 100% !important;
+  max-width: none !important;
+}
+
+.watch-embed-mode #player-api,
+.watch-embed-mode .player-width.player-height {
+  min-height: 200px;
+  height: 100% !important;
+}
+.watch-embed-mode #player-mole-container {
+  height: 100%;
+}
+
+/* Mini player (disabled in JS) — keep rules if re-enabled
+.ytp-legacy-miniplayer-button { cursor: pointer; opacity: 0.9; }
+.ytp-legacy-miniplayer-button:hover { opacity: 1; }
+.ytp-legacy-miniplayer-button img { display: block; margin: auto; pointer-events: none; }
+*/
+
+/* Speed / quality / codec inside native settings (gear) menu — spacing only (no extra top rule; avoids double line with stock menu) */
+.yt-legacy-stream-settings-root {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 0;
+  clear: both;
+}
+.ytp-legacy-stream-row .ytp-legacy-stream-cell {
+  text-align: right;
+}
+.yt-legacy-stream-select {
+  max-width: 130px;
+  padding: 2px 4px;
+  font-size: 12px;
+  line-height: 1.2;
+  color: #eee;
+  background: #333;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 1px;
+}
+.yt-legacy-stream-select:focus {
+  outline: 1px solid rgba(255, 255, 255, 0.4);
+}
+
+/* Override player-common.webp to use .png for specific UI elements */
+/* Subtitles button */
+.ytp-subtitles-button,
+.ytp-subtitles-button:focus,
+.ytp-subtitles-button:hover {
+  background-image: url(../images/player-common-vflp3GS9A.png) !important;
+}
+
+.ytp-subtitles-button-active,
+.ytp-subtitles-button-active:focus,
+.ytp-subtitles-button-active:hover {
+  background-image: url(../images/player-common-vflp3GS9A.png) !important;
+}
+
+/* International subtitles */
+.cc-international .ytp-subtitles-button,
+.cc-international .ytp-subtitles-button:focus,
+.cc-international .ytp-subtitles-button:hover {
+  background-image: url(../images/player-common-vflp3GS9A.png) !important;
+}
+
+.cc-international .ytp-subtitles-button-active,
+.cc-international .ytp-subtitles-button-active:focus,
+.cc-international .ytp-subtitles-button-active:hover {
+  background-image: url(../images/player-common-vflp3GS9A.png) !important;
+}
+
+/* Remote control buttons */
+.ytp-remote-button,
+.ytp-remote-button:focus,
+.ytp-remote-button:hover {
+  background-image: url(../images/player-common-vflp3GS9A.png) !important;
+}
+
+.ytp-remote-button-active,
+.ytp-remote-button-active:focus,
+.ytp-remote-button-active:hover {
+  background-image: url(../images/player-common-vflp3GS9A.png) !important;
+}
+
+/* Playlist expand/collapse icons */
+.ytp-button-expand .ytp-button-playlist-icon {
+  background-image: url(../images/player-common-vflp3GS9A.png) !important;
+}
+
+.ytp-button-collapse .ytp-button-playlist-icon {
+  background-image: url(../images/player-common-vflp3GS9A.png) !important;
+}
+
+/* Remote display status icon */
+.ytp-remote-display-status-icon {
+  background-image: url(../images/player-common-vflp3GS9A.png) !important;
+}
+
+/* Remote maximize button */
+.ytp-button-remote-maximize-icon {
+  background-image: url(../images/player-common-vflp3GS9A.png) !important;
+}
+
+.ytp-button-remote-maximize:hover .ytp-button-remote-maximize-icon {
+  background-image: url(../images/player-common-vflp3GS9A.png) !important;
+}
+
+/* Watch page like/dislike icons - use www-hitchhiker PNG instead of WEBP */
+.yt-uix-button-icon-watch-like,
+.yt-uix-button-icon-watch-dislike {
+  /* These are <img> tags with transparent GIF, need to set as background on parent or replace src */
+  /* Will be handled by JavaScript fallback for IE */
+}
+
+/* Left sidebar subscriptions section styling */
+#guide-subscriptions-section h3 {
+  padding: 8px 0;
+  margin: 0;
+  font-size: 13px;
+  font-weight: bold;
+  color: #cc181e;
+}
+
+#guide-subscriptions-list .guide-item {
+  padding: 4px 6px;
+}
+
+#guide-subscriptions-list .guide-item:hover {
+  background-color: #f0f0f0;
+}
+
+#guide-subscriptions-list .display-name {
+  font-size: 12px;
+  line-height: 1.3;
+}

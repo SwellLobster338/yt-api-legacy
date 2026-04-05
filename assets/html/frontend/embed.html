@@ -1,95 +1,107 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="yt-embed-html-root" data-cast-api-enabled="true" data-main-url="{{MAIN_URL_ATTR}}" data-video-id="{{VIDEO_ID_ATTR}}">
 <head>
-  <meta charset="UTF-8">
-  <meta http-equiv="X-UA-Compatible" content="IE=edge">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Video</title>
-  <link rel="stylesheet" href="/assets/embed/styles.css">
-  <script src="/assets/embed/script.js" defer></script>
+  <script>
+    if (!window.ytcsi) {
+      window.ytcsi = { tick: function () {}, span: function () {}, info: function () {} };
+    }
+  </script>
+  <script src="/assets/js/www-scheduler-vflKNUgKf.js" type="text/javascript" name="www-scheduler"></script>
+  <script>var ytimg = {}; ytimg.count = 1; ytimg.preload = function (src) { var img = new Image(); var count = ++ytimg.count; ytimg[count] = img; img.onload = img.onerror = function () { delete ytimg[count]; }; img.src = src; };</script>
+  <link rel="stylesheet" href="/assets/css/www-core-webp-vfl1_Ct-R.css" name="www-core">
+  <script src="/assets/js/html5player-en_US-vfl19qQQ_.js" type="text/javascript" name="html5player"></script>
+  <link rel="stylesheet" href="/assets/css/www-player-webp-vflNjHGsU.css" name="www-player">
+  <link rel="stylesheet" href="/assets/css/legacy-yt-extras.css" name="legacy-yt-extras">
+  <script src="/assets/js/ie-player-fallback.js"></script>
+  <style>
+    /* Embed page: remove any top margin/padding, ensure full viewport fill */
+    html.yt-embed-html-root, html.yt-embed-html-root body {
+      margin: 0 !important;
+      padding: 0 !important;
+      width: 100% !important;
+      height: 100% !important;
+      min-height: 100vh !important;
+      background: #000;
+      overflow: hidden;
+    }
+    
+    /* Ensure player container has no offset */
+    #player.watch-embed-mode {
+      position: absolute !important;
+      top: 0 !important;
+      left: 0 !important;
+      right: 0 !important;
+      bottom: 0 !important;
+      margin: 0 !important;
+      padding: 0 !important;
+      width: 100% !important;
+      height: 100% !important;
+    }
+    
+    /* Player API container fills entire space */
+    #player-api.player-width.player-height {
+      position: absolute !important;
+      top: 0 !important;
+      left: 0 !important;
+      width: 100% !important;
+      height: 100% !important;
+      max-width: none !important;
+      margin: 0 !important;
+    }
+    
+    /* Theater background should not interfere */
+    #theater-background {
+      display: none !important;
+    }
+    
+    /* Video element fills container */
+    #player-api .html5-video-player,
+    #player-api .html5-video-container,
+    #player-api video.html5-main-video {
+      width: 100% !important;
+      height: 100% !important;
+      position: absolute !important;
+      top: 0 !important;
+      left: 0 !important;
+      object-fit: contain !important;
+    }
+    
+    /* Responsive: maintain aspect ratio on resize */
+    @media (max-aspect-ratio: 16/9) {
+      #player-api video.html5-main-video {
+        height: auto !important;
+        max-height: 100% !important;
+        width: 100% !important;
+      }
+    }
+    
+    @media (min-aspect-ratio: 16/9) {
+      #player-api video.html5-main-video {
+        width: auto !important;
+        max-width: 100% !important;
+        height: 100% !important;
+      }
+    }
+  </style>
 </head>
 <body>
-  <div class="video-container paused" data-volume-level="high">
-    <img class="thumbnail-img">
-    <div class="video-controls-container">
-      <div class="timeline-container">
-        <div class="timeline">
-          <img class="preview-img">
-          <div class="thumb-indicator"></div>
+  <div id="player" class="watch-small watch-embed-mode" style="width:100%;height:100%;min-height:100%">
+    <div id="theater-background"></div>
+    <div id="player-mole-container" style="height:100%">
+      <div id="player-unavailable" class="hid player-width player-height player-unavailable">
+        <img class="icon meh" src="/assets/images/pixel-vfl3z5WfW_1.gif" alt="">
+        <div class="content">
+          <h1 id="unavailable-message" class="message">This video is unavailable.</h1>
+          <div id="unavailable-submessage" class="submessage"></div>
         </div>
       </div>
-      <div class="controls">
-        <button class="play-pause-btn">
-          <img class="loading-icon" src="/assets/images/loading.gif" alt="">
-          <img class="play-icon" src="/assets/images/play.png" alt="Play">
-          <img class="pause-icon" src="/assets/images/pause.png" alt="Pause">
-        </button>
-        <div class="volume-container">
-          <button class="mute-btn">
-            <img class="volume-high-icon" src="/assets/images/volume_full.png" alt="Volume high">
-            <img class="volume-muted-icon" src="/assets/images/volume_none.png" alt="Muted">
-          </button>
-        </div>
-        <div class="duration-container">
-          <div class="current-time">0:00</div>
-          /
-          <div class="total-time"></div>
-        </div>
-        <button class="settings-btn" type="button" title="Settings">
-          <img src="/assets/images/settings.png" alt="Settings">
-        </button>
-        <button class="mini-player-btn">
-          <img src="/assets/images/miniplayer.png" alt="Mini player">
-        </button>
-        <button class="full-screen-btn">
-          <img class="open" src="/assets/images/fullscreen.png" alt="Enter fullscreen">
-          <img class="close" src="/assets/images/un_fullscreen.png" alt="Exit fullscreen">
-        </button>
-      </div>
-      <div class="settings-panel" id="settings-panel">
-        <!-- Annotations
-        <div class="settings-row">
-          <span class="settings-label">Annotations</span>
-          <div class="settings-annotations">
-            <button type="button" class="settings-annot-btn active" data-value="on">ON</button>
-            <button type="button" class="settings-annot-btn" data-value="off">OFF</button>
-          </div>
-        </div>
-        -->
-        <div class="settings-row">
-          <span class="settings-label">Speed</span>
-          <select class="settings-speed" id="settings-speed">
-            <option value="0.25">0.25x</option>
-            <option value="0.5">0.5x</option>
-            <option value="0.75">0.75x</option>
-            <option value="1" selected>Normal</option>
-            <option value="1.25">1.25x</option>
-            <option value="1.5">1.5x</option>
-            <option value="1.75">1.75x</option>
-            <option value="2">2x</option>
-          </select>
-        </div>
-        <div class="settings-row">
-          <span class="settings-label">Quality</span>
-          <select class="settings-quality" id="settings-quality">
-            <option value="auto" selected>Auto (360p)</option>
-            <option value="360">360p</option>
-            <option value="480">480p</option>
-            <option value="720">720p</option>
-            <option value="1080">1080p</option>
-          </select>
-        </div>
-        <div class="settings-row">
-          <span class="settings-label">Codec</span>
-          <select class="settings-codec" id="settings-codec">
-            <option value="" selected>Standard</option>
-            <option value="mpeg4">MPEG4</option>
-          </select>
-        </div>
-      </div>
+      <div id="player-api" class="player-width player-height off-screen-target player-api"></div>
+      {{YTPLAYER_INIT}}
     </div>
-    <div class="video-activity-overlay" aria-hidden="true"></div>
-    <video src="{{VIDEO_SRC}}" poster="{{POSTER}}"></video>
   </div>
+  <script src="/assets/js/legacy-yt-player-bridge.js" defer></script>
 </body>
 </html>
