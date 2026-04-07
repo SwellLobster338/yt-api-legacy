@@ -3185,11 +3185,89 @@ async fn proxy_image(url: &str) -> HttpResponse {
                 .unwrap_or("image/jpeg")
                 .to_string();
 
+            // Validate that content type is an image
+            if !content_type.starts_with("image/") {
+                crate::log::info!("Blocked non-image content-type: {} from URL: {}", content_type, url);
+                return HttpResponse::Forbidden()
+                    .json(serde_json::json!({
+                        "error": "Only image files are allowed"
+                    }));
+            }
+
+            // Additional validation: check for dangerous content types
+            let allowed_image_types = [
+                "image/jpeg",
+                "image/jpg", 
+                "image/png",
+                "image/gif",
+                "image/webp",
+                "image/svg+xml",
+                "image/bmp",
+                "image/tiff",
+                "image/x-icon",
+                "image/vnd.microsoft.icon",
+            ];
+
+            let is_allowed = allowed_image_types.iter().any(|&allowed| {
+                content_type.eq_ignore_ascii_case(allowed)
+            });
+
+            if !is_allowed {
+                crate::log::info!("Blocked unsupported image type: {} from URL: {}", content_type, url);
+                return HttpResponse::Forbidden()
+                    .json(serde_json::json!({
+                        "error": "Unsupported image format"
+                    }));
+            }
+
             match resp.bytes().await {
-                Ok(bytes) => HttpResponse::Ok()
-                    .content_type(content_type)
-                    .insert_header(("Cache-Control", "public, max-age=86400"))
-                    .body(bytes),
+                Ok(bytes) => {
+                    // Additional security: verify the file starts with valid image magic bytes
+                    if bytes.len() < 2 {
+                        return HttpResponse::NotFound()
+                            .json(serde_json::json!({
+                                "error": "Invalid image file"
+                            }));
+                    }
+
+                    // Check magic bytes for common image formats
+                    let is_valid_image = if bytes.len() >= 12 && bytes[0] == 0x52 && bytes[1] == 0x49 && &bytes[8..12] == b"WEBP" {
+                        // WebP: RIFF....WEBP
+                        true
+                    } else if bytes.len() >= 2 {
+                        match (bytes[0], bytes[1]) {
+                            // JPEG: FF D8
+                            (0xFF, 0xD8) => true,
+                            // PNG: 89 50 4E 47
+                            (0x89, 0x50) => true,
+                            // GIF: 47 49 46
+                            (0x47, 0x49) => true,
+                            // BMP: 42 4D
+                            (0x42, 0x4D) => true,
+                            // TIFF: 49 49 or 4D 4D
+                            (0x49, 0x49) | (0x4D, 0x4D) => true,
+                            // ICO: 00 00
+                            (0x00, 0x00) => true,
+                            // For SVG and other formats, rely on content-type
+                            _ => content_type.contains("svg") || content_type.contains("icon"),
+                        }
+                    } else {
+                        false
+                    };
+
+                    if !is_valid_image {
+                        crate::log::info!("Blocked file with invalid magic bytes, content-type: {}", content_type);
+                        return HttpResponse::Forbidden()
+                            .json(serde_json::json!({
+                                "error": "Invalid image file format"
+                            }));
+                    }
+
+                    HttpResponse::Ok()
+                        .content_type(content_type)
+                        .insert_header(("Cache-Control", "public, max-age=86400"))
+                        .body(bytes)
+                },
                 Err(_) => HttpResponse::NotFound().finish(),
             }
         }

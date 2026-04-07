@@ -111,12 +111,36 @@ def ask_for_api_keys() -> list[str]:
     return keys
 
 
+def ask_for_logging_config() -> dict:
+    print("\n=== Logging Configuration ===")
+    print("Enable logging to files?")
+    
+    while True:
+        value = input("Enable file logging? (yes/no) [default: yes]: ").strip().lower()
+        if value in ['', 'yes', 'y', 'no', 'n']:
+            enabled = value in ['', 'yes', 'y']
+            break
+        print("Please enter 'yes' or 'no'")
+    
+    if not enabled:
+        print("→ File logging disabled")
+        return {"enabled": False, "directory": "logs"}
+    
+    directory = input("Log directory [default: logs]: ").strip()
+    if not directory:
+        directory = "logs"
+    
+    print(f"→ File logging enabled, directory: {directory}")
+    return {"enabled": True, "directory": directory}
+
+
 def main():
     print("=== Config.yml Generator ===\n")
 
     port = ask_for_port()
     main_url = ask_for_main_url()
     active_keys = ask_for_api_keys()
+    logging_config = ask_for_logging_config()
     fresh_key = get_fresh_innertube_key()
 
     config = {
@@ -168,6 +192,10 @@ def main():
             "temp_folder_max_size_mb": 5120,
             "cleanup_threshold_mb": 100,
         },
+        "logging": {
+            "enabled": logging_config["enabled"],
+            "directory": logging_config["directory"],
+        },
         "instances": [
             "https://yt.legacyprojects.ru",
             "https://yt.modyleprojects.ru",
@@ -187,6 +215,9 @@ def main():
         print(f"Active API keys : {len(active_keys)} items")
         if active_keys:
             print(" " + ", ".join(active_keys[:3]) + ("..." if len(active_keys) > 3 else ""))
+        print(f"File logging : {'enabled' if logging_config['enabled'] else 'disabled'}")
+        if logging_config['enabled']:
+            print(f"Log directory : {logging_config['directory']}/")
     except Exception as e:
         print("Error writing file:", e)
 

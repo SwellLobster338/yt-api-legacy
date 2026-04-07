@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use std::fs;
 
 use crate::config::Config;
-use crate::routes::additional::{HistoryItem, RecommendationItem};
+use crate::routes::additional::{HistoryItem, RecommendationItem, SubscriptionItem};
 use crate::routes::auth::{AuthConfig, TokenStore};
 use crate::routes::channel::{ChannelVideosResponse, ChannelVideo};
 use crate::routes::search::{SearchResult, TopVideo};
@@ -212,10 +212,55 @@ fn render_navbar(main_url: &str, search_query: &str) -> String {
 }
 
 // ---- Sidebar (guide) - separate partial; tech section only on root page
-fn render_sidebar(main_url: &str, tech_section: Option<&str>) -> String {
+fn render_sidebar(main_url: &str, tech_section: Option<&str>, subscriptions_html: Option<&str>) -> String {
     let t = load_template("partials/sidebar");
     let t = t.replace("{{MAIN_URL}}", main_url);
-    t.replace("{{SIDEBAR_TECH_SECTION}}", tech_section.unwrap_or(""))
+    let t = t.replace("{{SIDEBAR_TECH_SECTION}}", tech_section.unwrap_or(""));
+    let t = t.replace("{{SUBSCRIPTIONS_LIST}}", subscriptions_html.unwrap_or(""));
+    t
+}
+
+/// Helper to render full sidebar with subscriptions and tech section (for pages that need auth)
+async fn render_sidebar_with_auth(
+    req: &HttpRequest,
+    data: &web::Data<crate::AppState>,
+    auth_config: &web::Data<AuthConfig>,
+    token_store: &web::Data<TokenStore>,
+    include_tech_section: bool,
+) -> String {
+    let config = &data.config;
+    let main_url = base_url(req, config);
+    let main_url_trimmed = main_url.trim_end_matches('/');
+    let port = config.server.port;
+    
+    // Get refresh token from cookie
+    let refresh_token = req
+        .cookie("session_id")
+        .and_then(|c| token_store.get_token(c.value()))
+        .filter(|t| !t.is_empty() && !t.starts_with("Error"));
+    
+    // Fetch subscriptions if logged in
+    let subscriptions_html = match refresh_token {
+        Some(ref token) => {
+            let subscriptions = crate::routes::additional::fetch_subscriptions_for_token(
+                token,
+                auth_config,
+                config,
+                main_url_trimmed,
+            ).await;
+            render_sidebar_subscriptions(&subscriptions, &main_url)
+        }
+        None => String::new(),
+    };
+    
+    // Tech section (only on root page)
+    let tech_section = if include_tech_section {
+        render_sidebar_tech_section(port, &config.instants, &main_url)
+    } else {
+        String::new()
+    };
+    
+    render_sidebar(&main_url, Some(&tech_section), Some(&subscriptions_html))
 }
 
 fn render_sidebar_tech_section(port: u16, instants: &[crate::config::InstantInstance], main_url: &str) -> String {
@@ -317,12 +362,28 @@ pub async fn page_root(
 
     let navbar = render_navbar(&main_url, "");
     let sidebar_tech_section = render_sidebar_tech_section(port, &config.instants, &main_url);
-    let sidebar_html = render_sidebar(&main_url, Some(&sidebar_tech_section));
-    let (main_content, subscriptions_sidebar, body_class) = match refresh_token {
+    
+    // Fetch subscriptions for sidebar (if logged in)
+    let subscriptions_html = match refresh_token {
+        Some(ref token) => {
+            let subscriptions = crate::routes::additional::fetch_subscriptions_for_token(
+                token,
+                &auth_config,
+                config,
+                main_url_trimmed,
+            ).await;
+            render_sidebar_subscriptions(&subscriptions, &main_url)
+        }
+        None => String::new(),
+    };
+    
+    let sidebar_html = render_sidebar(&main_url, Some(&sidebar_tech_section), Some(&subscriptions_html));
+    let (main_content, body_class) = match refresh_token {
         Some(_) => {
             let videos_grid = render_video_grid(&videos, &main_url);
             let recommendations_shelf = render_recommendations_shelf(&recommendations, &main_url);
             let history_shelf = render_history_shelf(&history, &main_url);
+            
             // Logged in: recommendations → watch history → trends at the bottom
             let content = format!(
                 r#"{}
@@ -336,11 +397,10 @@ pub async fn page_root(
                 history_shelf,
                 videos_grid
             );
-            (content, subscriptions_sidebar_loading_placeholder(), String::new())
+            (content, String::new())
         }
         None => (
             logged_out_main_placeholder(),
-            String::new(),
             "home-logged-out".to_string(),
         ),
     };
@@ -352,7 +412,6 @@ pub async fn page_root(
         .replace("{{MAIN_URL}}", &main_url)
         .replace("{{PORT}}", &port.to_string())
         .replace("{{MAIN_CONTENT}}", &main_content)
-        .replace("{{SUBSCRIPTIONS_SIDEBAR}}", &subscriptions_sidebar)
         .replace("{{BODY_CLASS}}", &body_class);
 
     HttpResponse::Ok()
@@ -618,6 +677,54 @@ fn subscriptions_sidebar_loading_placeholder() -> String {
         .to_string()
 }
 
+/// Render subscriptions list for sidebar (in sidebar format like "Best of YouTube")
+fn render_sidebar_subscriptions(items: &[SubscriptionItem], main_url: &str) -> String {
+    if items.is_empty() {
+        return r##"<li class="vve-check guide-channel overflowable-list-item">
+                  <a class="guide-item yt-uix-sessionlink yt-valign spf-link" href="#" title="No subscriptions">
+                    <span class="yt-valign-container">
+                      <img src="/assets/images/pixel-vfl3z5WfW.gif" class="thumb" alt="">
+                      <span class="display-name no-count"><span>No subscriptions yet</span></span>
+                    </span>
+                  </a>
+                </li>"##.to_string();
+    }
+    
+    // Show only first 5 subscriptions
+    let items_to_show = items.iter().take(10);
+    
+    let mut subs_html = String::new();
+    for sub in items_to_show {
+        let channel_url = format!("{}/channel?handle={}", main_url, urlencoding::encode(&sub.title));
+        // Use direct thumbnail URL through proxy, fallback to channel_id if empty
+        let thumb = if !sub.thumbnail.is_empty() {
+            format!("{}/channel_icon/{}", main_url.trim_end_matches('/'), urlencoding::encode(&sub.thumbnail))
+        } else if !sub.local_thumbnail.is_empty() {
+            format!("{}/channel_icon/{}", main_url.trim_end_matches('/'), urlencoding::encode(&sub.local_thumbnail))
+        } else if !sub.channel_id.is_empty() {
+            format!("{}/channel_icon/{}", main_url.trim_end_matches('/'), urlencoding::encode(&sub.channel_id))
+        } else {
+            format!("{}/channel_icon/{}", main_url.trim_end_matches('/'), urlencoding::encode(&sub.title))
+        };
+        subs_html.push_str(&format!(
+            r#"<li class="vve-check guide-channel overflowable-list-item">
+                  <a class="guide-item yt-uix-sessionlink yt-valign spf-link" href="{}" title="{}">
+                    <span class="yt-valign-container">
+                      <span class="thumb"><span class="video-thumb yt-thumb yt-thumb-20"><span class="yt-thumb-square"><span class="yt-thumb-clip"><img src="{}" width="20" height="20" alt=""><span class="vertical-align"></span></span></span></span></span>
+                      <span class="display-name no-count"><span>{}</span></span>
+                    </span>
+                  </a>
+                </li>"#,
+            h(&channel_url),
+            h(&sub.title),
+            h(&thumb),
+            h(&sub.title)
+        ));
+    }
+    
+    subs_html
+}
+
 // ---- Home (index): top videos — same structure as yt2014 index (compact shelf) ----
 fn render_video_grid(videos: &[TopVideo], main_url: &str) -> String {
     let base = main_url.trim_end_matches('/');
@@ -756,6 +863,8 @@ pub struct ResultsQuery {
 pub async fn page_results(
     req: HttpRequest,
     data: web::Data<crate::AppState>,
+    auth_config: web::Data<AuthConfig>,
+    token_store: web::Data<TokenStore>,
     query: web::Query<ResultsQuery>,
 ) -> impl Responder {
     let config = &data.config;
@@ -787,7 +896,7 @@ pub async fn page_results(
     };
 
     let navbar = render_navbar(&main_url, &search_query);
-    let sidebar_html = render_sidebar(&main_url, None);
+    let sidebar_html = render_sidebar_with_auth(&req, &data, &auth_config, &token_store, false).await;
     let results_html = if videos.is_empty() && !search_query.is_empty() {
         format!(
             r#"<div class="yt-alert yt-alert-default"><div class="yt-alert-content">No results for "{}"</div></div>"#,
@@ -973,7 +1082,53 @@ pub async fn page_watch(
     );
     let yt_cfg_str = serde_json::to_string(&yt_cfg).unwrap_or_else(|_| "{}".to_string());
     let yt_cfg_str = escape_json_for_html_script(&yt_cfg_str);
-    let ytplayer_init = yt_legacy_player_init_script(&yt_cfg_str);
+    let ytplayer_init = yt_legacy_player_init_script(&yt_cfg_str) + &format!(
+        r#"<script>
+(function() {{
+  /* Track fullscreen state for recovery */
+  window.__YT_LEGACY_FULLSCREEN_STATE__ = {{ entering: false, exited: false }};
+  
+  function onFullscreenChange() {{
+    var isFullscreen = document.fullscreenElement || document.webkitFullscreenElement || 
+                      document.mozFullScreenElement || document.msFullscreenElement;
+    if (!isFullscreen && window.__YT_LEGACY_FULLSCREEN_STATE__.entering) {{
+      /* Just exited fullscreen */
+      window.__YT_LEGACY_FULLSCREEN_STATE__.exited = true;
+      
+      /* Wait for player to stabilize, then check and fix if needed */
+      setTimeout(function() {{
+        var root = document.getElementById("movie_player");
+        if (!root) return;
+        
+        var v = root.getElementsByTagName("video")[0];
+        if (!v) {{
+          /* Player broken after fullscreen - reload page */
+          if (confirm("Player needs to be refreshed. Reload page?")) {{
+            window.location.reload();
+          }}
+          return;
+        }}
+        
+        /* Try to re-sync custom settings if they're missing */
+        if (window.__YT_LEGACY_REBUILD_COMPLETE__) {{
+          try {{
+            window.__YT_LEGACY_REBUILD_COMPLETE__();
+          }} catch(e) {{}}
+        }}
+        
+        window.__YT_LEGACY_FULLSCREEN_STATE__.exited = false;
+      }}, 500);
+    }}
+    window.__YT_LEGACY_FULLSCREEN_STATE__.entering = !!isFullscreen;
+  }}
+  
+  document.addEventListener('fullscreenchange', onFullscreenChange);
+  document.addEventListener('webkitfullscreenchange', onFullscreenChange);
+  document.addEventListener('mozfullscreenchange', onFullscreenChange);
+  document.addEventListener('MSFullscreenChange', onFullscreenChange);
+}})();
+</script>"#
+    );
 
     let navbar = render_navbar(&main_url, "");
     let related_html = if related.is_empty() {
@@ -1174,6 +1329,8 @@ fn normalize_channel_handle(handle: &str) -> String {
 pub async fn page_channel(
     req: HttpRequest,
     data: web::Data<crate::AppState>,
+    auth_config: web::Data<AuthConfig>,
+    token_store: web::Data<TokenStore>,
     query: web::Query<ChannelQuery>,
 ) -> impl Responder {
     let handle = match &query.handle {
@@ -1219,7 +1376,7 @@ pub async fn page_channel(
     let channel_url = format!("{}/channel?handle={}", main_url, urlencoding::encode(&handle));
 
     let navbar = render_navbar(&main_url, "");
-    let sidebar_html = render_sidebar(&main_url, None);
+    let sidebar_html = render_sidebar_with_auth(&req, &data, &auth_config, &token_store, false).await;
     let spotlight_html = render_spotlight_html(videos, &main_url);
     let videos_html = render_channel_videos(videos, &main_url);
 
@@ -1246,11 +1403,13 @@ pub async fn page_channel(
 pub async fn page_login(
     req: HttpRequest,
     data: web::Data<crate::AppState>,
+    auth_config: web::Data<AuthConfig>,
+    token_store: web::Data<TokenStore>,
 ) -> impl Responder {
     let config = &data.config;
     let main_url = base_url(&req, config);
     let navbar = render_navbar(&main_url, "");
-    let sidebar_html = render_sidebar(&main_url, None);
+    let sidebar_html = render_sidebar_with_auth(&req, &data, &auth_config, &token_store, false).await;
     let t = load_template("login");
     let html = t
         .replace("{{NAVBAR}}", &navbar)
@@ -1277,7 +1436,7 @@ pub async fn page_logout(
         .insert_header(("Location", login_url))
         .insert_header((
             "Set-Cookie",
-            "session_id=; Path=/; Max-Age=0",
+            "session_id=; Path=/; Max-Age=0; SameSite=Lax",
         ))
         .finish()
 }
@@ -1324,7 +1483,37 @@ pub async fn page_embed(
     );
     let yt_cfg_str = serde_json::to_string(&yt_cfg).unwrap_or_else(|_| "{}".to_string());
     let yt_cfg_str = escape_json_for_html_script(&yt_cfg_str);
-    let ytplayer_init = yt_legacy_player_init_script(&yt_cfg_str);
+    let ytplayer_init = yt_legacy_player_init_script(&yt_cfg_str) + &format!(
+        r#"<script>
+(function() {{
+  window.__YT_LEGACY_FULLSCREEN_STATE__ = {{ entering: false, exited: false }};
+  function onFullscreenChange() {{
+    var isFullscreen = document.fullscreenElement || document.webkitFullscreenElement || 
+                      document.mozFullScreenElement || document.msFullscreenElement;
+    if (!isFullscreen && window.__YT_LEGACY_FULLSCREEN_STATE__.entering) {{
+      window.__YT_LEGACY_FULLSCREEN_STATE__.exited = true;
+      setTimeout(function() {{
+        var root = document.getElementById("movie_player");
+        if (!root) return;
+        var v = root.getElementsByTagName("video")[0];
+        if (!v && confirm("Player needs to be refreshed. Reload page?")) {{
+          window.location.reload();
+        }}
+        if (window.__YT_LEGACY_REBUILD_COMPLETE__) {{
+          try {{ window.__YT_LEGACY_REBUILD_COMPLETE__(); }} catch(e) {{}}
+        }}
+        window.__YT_LEGACY_FULLSCREEN_STATE__.exited = false;
+      }}, 500);
+    }}
+    window.__YT_LEGACY_FULLSCREEN_STATE__.entering = !!isFullscreen;
+  }}
+  document.addEventListener('fullscreenchange', onFullscreenChange);
+  document.addEventListener('webkitfullscreenchange', onFullscreenChange);
+  document.addEventListener('mozfullscreenchange', onFullscreenChange);
+  document.addEventListener('MSFullscreenChange', onFullscreenChange);
+}})();
+</script>"#
+    );
     let t = load_template("embed");
     let html = t
         .replace("{{MAIN_URL}}", &base)

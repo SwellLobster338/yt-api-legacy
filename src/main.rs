@@ -1,7 +1,7 @@
 use actix_files as fs;
 use actix_web::middleware::{NormalizePath, TrailingSlash};
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -10,6 +10,7 @@ use config::Config;
 mod check;
 mod log;
 mod routes;
+mod ip_blocker;
 
 use routes::auth::{AuthConfig, TokenStore};
 
@@ -129,6 +130,12 @@ async fn main() -> std::io::Result<()> {
 
     let config = Config::from_file("config.yml").expect("Failed to load config.yml");
 
+    // Initialize file logging
+    log::init_file_logger(config.logging.enabled, &config.logging.directory);
+
+    // Load blocked IPs from robots.txt
+    ip_blocker::load_blocked_ips("robots.txt");
+
     let redirect_base = if let Some(custom) = config.api.oauth.redirect_uri.clone() {
         custom.trim_end_matches('/').to_string()
     } else if !config.server.main_url.is_empty() {
@@ -182,6 +189,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(auth_config_data.clone())
             .app_data(token_store_data.clone())
             .wrap(NormalizePath::new(TrailingSlash::MergeOnly))
+            .wrap(routes::middleware::IpBlocker)
             .wrap(log::SelectiveLogger::default())
             .service(fs::Files::new("/assets", "assets/").show_files_listing())
             .service(SwaggerUi::new("/docs/{_:.*}").url("/openapi.json", openapi.clone()))

@@ -228,6 +228,24 @@ pub struct Config {
     #[serde(default)]
     #[serde(rename = "instances")]
     pub instants: Vec<InstantInstance>,
+    #[serde(default)]
+    pub logging: LoggingConfig,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, ToSchema, Default)]
+pub struct LoggingConfig {
+    #[serde(default = "default_logging_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_logging_directory")]
+    pub directory: String,
+}
+
+fn default_logging_enabled() -> bool {
+    true
+}
+
+fn default_logging_directory() -> String {
+    "logs".to_string()
 }
 
 static API_KEY_COUNTER: AtomicUsize = AtomicUsize::new(0);

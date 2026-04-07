@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 use base64::{Engine as _, engine::general_purpose};
 use reqwest;
-use actix_web::cookie::{Cookie, SameSite};
+use actix_web::cookie::{Cookie, SameSite, time};
 
 #[derive(Clone)]
 pub struct DeviceFlowData {
@@ -471,6 +471,7 @@ pub async fn auth_start(
     let auth_url = get_auth_url(&data, &session_id);
     let cookie = Cookie::build("session_id", session_id.clone())
         .path("/")
+        .max_age(time::Duration::days(30))
         .same_site(SameSite::Lax)
         .http_only(false)
         .finish();
@@ -522,6 +523,7 @@ pub async fn auth_handler(
             let token_display = format!("Token: {}", html_escape::encode_text(&token));
             let cookie = Cookie::build("session_id", session_id.clone())
                 .path("/")
+                .max_age(time::Duration::days(30))
                 .same_site(SameSite::Lax)
                 .http_only(false)
                 .finish();
@@ -550,6 +552,7 @@ pub async fn auth_handler(
                     let token_display = format!("Token: {}", html_escape::encode_text(&refresh_token));
                     let cookie = Cookie::build("session_id", session_id.clone())
                         .path("/")
+                        .max_age(time::Duration::days(30))
                         .same_site(SameSite::Lax)
                         .http_only(false)
                         .finish();
@@ -623,6 +626,7 @@ pub async fn auth_handler(
                     
                     let cookie = Cookie::build("session_id", session_id.clone())
                         .path("/")
+                        .max_age(time::Duration::days(30))
                         .same_site(SameSite::Lax)
                         .http_only(false)
                         .finish();
@@ -745,6 +749,7 @@ pub async fn oauth_callback(
                             
                             let cookie = Cookie::build("session_id", session_id.clone())
                                 .path("/")
+                                .max_age(time::Duration::days(30))
                                 .same_site(SameSite::Lax)
                                 .http_only(false)
                                 .finish();
@@ -768,6 +773,7 @@ pub async fn oauth_callback(
                             
                             let cookie = Cookie::build("session_id", session_id.clone())
                                 .path("/")
+                                .max_age(time::Duration::days(30))
                                 .same_site(SameSite::Lax)
                                 .http_only(false)
                                 .finish();

@@ -1,0 +1,54 @@
+server:
+  port: 2823
+  main_url: ''
+  secret_key: test
+api:
+  request_timeout: 30
+  keys:
+    active: []
+    disabled: []
+  innertube:
+    key: AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8
+    user_agent: "com.google.ios.youtube/19.16.3 (iPhone16,2; U; CPU iOS 18_0 like Mac OS X)"
+    client:
+      client_name: "IOS"
+      client_version: "20.49.6"
+      device_make: "Apple"
+      device_model: "iPhone16,2"
+      os_name: "iOS"
+      os_version: "18.0"
+  oauth:
+    client_id: 861556708454-d6dlm3lh05idd8npek18k6be8ba3oc68.apps.googleusercontent.com
+    client_secret: SboVhoG9s0rNafixCSGGKXAT
+    redirect_uri: null
+video:
+  source: innertube
+  use_cookies: true
+  default_quality: '360'
+  available_qualities:
+  - '144'
+  - '240'
+  - '360'
+  - '480'
+  - '720'
+  - '1080'
+  - '1440'
+  - '2160'
+  default_count: 50
+proxy:
+  thumbnails:
+    video: true
+    channel: false
+    fetch_channel_thumbnails: false
+  video_proxy: true
+cache:
+  temp_folder_max_size_mb: 5120
+  cleanup_threshold_mb: 100
+logging:
+  enabled: true
+  directory: "logs"
+instances:
+- https://yt.legacyprojects.ru
+- https://yt.modyleprojects.ru
+- https://ytcloud.meetlook.ru
+- https://yt.swlbst.ru

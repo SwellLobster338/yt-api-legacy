@@ -4,6 +4,7 @@ pub mod auth;
 pub mod auth_routes;
 pub mod channel;
 pub mod frontend;
+pub mod middleware;
 pub mod oauth;
 pub mod search;
 pub mod video;
