@@ -5,6 +5,65 @@
     min-height: 100vh;
 }
 
+/* Search suggestions dropdown - YouTube 2014 style */
+#masthead-search {
+    position: relative !important;
+    z-index: 999;
+}
+
+.masthead-search-suggestions {
+    position: absolute !important;
+    top: 100% !important;
+    left: 0 !important;
+    right: 0 !important;
+    z-index: 1000 !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+.masthead-search-suggestions .gssb_c {
+    box-shadow: 0 2px 4px rgba(0,0,0,0.2) !important;
+    -webkit-box-shadow: 0 2px 4px rgba(0,0,0,0.2) !important;
+    -moz-box-shadow: 0 2px 4px rgba(0,0,0,0.2) !important;
+    border: 1px solid #ccc !important;
+    border-top: none !important;
+    background: #fff !important;
+    display: block !important;
+}
+
+.masthead-search-suggestions .gssb_a {
+    border-bottom: 1px solid #ebebeb !important;
+}
+
+.masthead-search-suggestions .gssb_a:last-child {
+    border-bottom: none !important;
+}
+
+.masthead-search-suggestions .gssb_a:hover,
+.masthead-search-suggestions .gssb_a.gssb_i {
+    background-color: #eee !important;
+    cursor: pointer !important;
+}
+
+.masthead-search-suggestions .gsq_a span b {
+    font-weight: bold !important;
+}
+
+.masthead-search-suggestions table {
+    border-collapse: collapse !important;
+    border-spacing: 0 !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+.masthead-search-suggestions td {
+    padding: 4px 8px !important;
+    cursor: pointer !important;
+    text-align: left !important;
+}
+
 /* Watch page: undo embed styles (body overflow/height) so page scrolls normally */
 body.watch-page {
     overflow: visible !important;
@@ -25,6 +84,10 @@ body.watch-page {
 }
 #page.home .branded-page-v2-body {
     max-width: 100%;
+}
+/* Expand container width to fit more content */
+#page.home .branded-page-v2-col-container {
+    
 }
 #page.home .compact-shelf-content-container,
 #page.home .yt-uix-shelfslider-body {
@@ -70,6 +133,13 @@ body.watch-page {
     margin-right: 324px; /* 300px sidebar + 24px gap — keep content left of sidebar in IE */
     overflow: hidden;
     min-width: 0;
+}
+/* Fix: add padding to primary column content to match top spacing */
+#page.home .yt-card {
+    padding: 20px;
+}
+#page.home .branded-page-v2-body.branded-page-v2-primary-column-content {
+    padding: 0;
 }
 /* Modern browsers: use flex when supported, override float layout */
 @supports (display: flex) {
@@ -521,4 +591,73 @@ body.guide-closed #guide {
 }
 .watch7-hovercard-account-line .yt-uix-button:hover {
     background: #145a9e;
+}
+
+/* Sidebar: enable scrolling for the entire sidebar */
+#guide {
+    position: fixed !important;
+    top: 60px !important; /* Below masthead */
+    left: 0 !important;
+    width: 230px !important;
+    height: calc(100vh - 60px) !important;
+    max-height: calc(100vh - 60px) !important;
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+    z-index: 100 !important;
+}
+
+#guide.yt-scrollbar {
+    height: calc(100vh - 60px) !important;
+    max-height: calc(100vh - 60px) !important;
+}
+
+#guide-container {
+    position: relative !important;
+    height: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
+}
+
+#guide-container.base {
+    height: auto !important;
+    max-height: none !important;
+}
+
+.guide-module-content {
+    max-height: none !important;
+    height: auto !important;
+    overflow: visible !important;
+}
+
+.guide-module-content.yt-scrollbar {
+    max-height: none !important;
+    height: auto !important;
+    overflow: visible !important;
+}
+
+/* Old IE fallback (no calc support) */
+#guide {
+    height: 800px !important;
+    max-height: 800px !important;
+}
+
+/* Custom scrollbar for modern browsers */
+#guide::-webkit-scrollbar {
+    width: 8px;
+}
+#guide::-webkit-scrollbar-track {
+    background: #f1f1f1;
+}
+#guide::-webkit-scrollbar-thumb {
+    background: #888;
+    border-radius: 4px;
+}
+#guide::-webkit-scrollbar-thumb:hover {
+    background: #555;
+}
+
+/* Subscriptions section: no height limit, let full sidebar scroll */
+#guide-subscriptions-section .guide-user-links {
+    max-height: none !important;
+    overflow-y: visible !important;
 }

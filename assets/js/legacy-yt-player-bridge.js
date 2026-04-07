@@ -101,6 +101,20 @@
     if (!base || !vid || !tpl || !window.yt || !window.yt.player || !window.yt.player.Application) {
       return;
     }
+    
+    /* Save playback state before rebuild */
+    var savedState = {
+      currentTime: 0,
+      paused: true
+    };
+    try {
+      var currentVideo = getMoviePlayerVideo();
+      if (currentVideo) {
+        savedState.currentTime = currentVideo.currentTime || 0;
+        savedState.paused = currentVideo.paused;
+      }
+    } catch (e) {}
+    
     var url = directUrl(base, vid, state.quality, state.codec);
     var cfg = JSON.parse(JSON.stringify(tpl));
     cfg.args = cfg.args || {};
@@ -118,9 +132,25 @@
     try {
       window.__YT_LEGACY_TEMPLATE_CONFIG__ = JSON.parse(JSON.stringify(cfg));
     } catch (e) {}
+    
+    /* Restore playback state after rebuild */
     waitForVideo(function () {
       applyPlaybackRate();
       syncInjectedSelects();
+      
+      /* Restore playback position and state */
+      setTimeout(function() {
+        var v = getMoviePlayerVideo();
+        if (v) {
+          try {
+            v.currentTime = savedState.currentTime;
+            if (!savedState.paused) {
+              var p = v.play();
+              if (p && p.catch) p.catch(function() {});
+            }
+          } catch (e) {}
+        }
+      }, 200);
     });
   }
 
@@ -391,13 +421,58 @@
       },
       true
     );
+    
+    /* Expose sync function globally for fullscreen recovery */
+    window.__YT_LEGACY_REBUILD_COMPLETE__ = function() {
+      syncInjectedSelects();
+      injectStreamSettings();
+    };
   }
 
   function boot() {
     waitForVideo(function () {
       applyPlaybackRate();
       startObservers();
+      setupFullscreenHandlers();
     });
+  }
+  
+  function setupFullscreenHandlers() {
+    var fullscreenEvents = ['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange'];
+    
+    for (var i = 0; i < fullscreenEvents.length; i++) {
+      legacyAddListener(document, fullscreenEvents[i], function() {
+        /* Check if we just exited fullscreen */
+        var isFullscreen = document.fullscreenElement || document.webkitFullscreenElement || 
+                          document.mozFullScreenElement || document.msFullscreenElement;
+        
+        if (!isFullscreen) {
+          /* Just exited fullscreen - give the player a moment to restore, then fix if needed */
+          setTimeout(function() {
+            var root = getPlayerRoot();
+            if (!root) return;
+            
+            /* Check if video element exists and is responsive */
+            var v = getMoviePlayerVideo();
+            if (!v) {
+              /* Video element missing - rebuild player */
+              rebuildPlayer();
+              return;
+            }
+            
+            /* Check if controls/settings are still functional */
+            var settingsBtn = root.querySelector('.ytp-settings-button');
+            if (settingsBtn && !root.querySelector('.yt-legacy-stream-settings-root')) {
+              /* Settings button exists but our custom settings don't - re-inject */
+              setTimeout(function() {
+                injectStreamSettings();
+                syncInjectedSelects();
+              }, 100);
+            }
+          }, 400);
+        }
+      });
+    }
   }
 
   if (document.readyState === "loading") {

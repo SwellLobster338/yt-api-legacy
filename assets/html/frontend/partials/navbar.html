@@ -15,6 +15,7 @@
       <input id="masthead-search-term" autocomplete="off" class="search-term yt-uix-form-input-bidi" name="search_query" value="{{SEARCH_QUERY}}" type="text" tabindex="1" title="Search" placeholder="Search">
     </label>
   </div>
+  <div id="masthead-search-suggestions" class="masthead-search-suggestions" style="display:none;"></div>
 </form></div></div></div>
 <div id="masthead-appbar-container" class="clearfix"><div id="masthead-appbar"><div id="appbar-content" class=""></div></div></div>
 <script type="text/javascript">
@@ -106,5 +107,300 @@
   xhr.open("GET", "/account_info?_=" + (typeof Date.now === "function" ? Date.now() : new Date().getTime()), true);
   try { xhr.withCredentials = true; } catch (e) {}
   xhr.send();
+})();
+</script>
+<script type="text/javascript">
+(function() {
+  var base = "{{MAIN_URL}}";
+  var input = document.getElementById("masthead-search-term");
+  var suggestionsBox = document.getElementById("masthead-search-suggestions");
+  
+  // Debug: check if elements exist
+  if (typeof console !== "undefined" && console.log) {
+    console.log("Search suggestions init - input:", !!input, "suggestionsBox:", !!suggestionsBox, "base:", base);
+  }
+  
+  if (!input || !suggestionsBox) {
+    if (typeof console !== "undefined" && console.warn) {
+      console.warn("Search suggestions: missing elements - input:", !!input, "suggestionsBox:", !!suggestionsBox);
+    }
+    return;
+  }
+
+  var currentQuery = "";
+  var selectedIndex = -1;
+  var suggestions = [];
+  var xhr = null;
+  var debounceTimer = null;
+  var isIE = /*@cc_on!@*/false || !!document.documentMode;
+
+  // Manual JSON parser for IE compatibility
+  function safeParseJSON(text) {
+    if (!text) return null;
+    try {
+      if (window.JSON && window.JSON.parse) {
+        return window.JSON.parse(text);
+      }
+    } catch (e) {}
+    try {
+      return eval("(" + text + ")");
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // Escape HTML entities
+  function esc(s) {
+    if (s == null) return "";
+    s = String(s);
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  // Highlight matching part of suggestion
+  function highlightMatch(query, suggestion) {
+    if (!query || !suggestion) return esc(suggestion);
+    var lowerQuery = query.toLowerCase();
+    var lowerSuggestion = suggestion.toLowerCase();
+    var idx = lowerSuggestion.indexOf(lowerQuery);
+    if (idx === -1) return esc(suggestion);
+    
+    var before = suggestion.substring(0, idx);
+    var match = suggestion.substring(idx, idx + query.length);
+    var after = suggestion.substring(idx + query.length);
+    
+    return esc(before) + "<b>" + esc(match) + "</b>" + esc(after);
+  }
+
+  // Render suggestions dropdown
+  function renderSuggestions() {
+    if (suggestions.length === 0) {
+      suggestionsBox.style.display = "none";
+      suggestionsBox.innerHTML = "";
+      return;
+    }
+
+    var html = '<table cellspacing="0" cellpadding="0" class="gstl_50 gssb_c" dir="ltr"><tbody>';
+    
+    for (var i = 0; i < suggestions.length; i++) {
+      var sug = suggestions[i];
+      var text = "";
+      if (typeof sug === "string") {
+        text = sug;
+      } else if (sug && sug[0]) {
+        text = sug[0];
+      }
+      if (!text) continue;
+      
+      var selectedClass = (i === selectedIndex) ? " gssb_i" : "";
+      html += '<tr class="gssb_a gsfs' + selectedClass + '" dir="ltr" data-index="' + i + '">';
+      html += '<td><div class="gsq_a"><span>' + highlightMatch(currentQuery, text) + '</span></div></td>';
+      html += '</tr>';
+    }
+    
+    html += '</tbody></table>';
+    suggestionsBox.innerHTML = html;
+    suggestionsBox.style.display = "block";
+
+    // Add click handlers to each suggestion
+    var rows = suggestionsBox.getElementsByTagName("tr");
+    for (var j = 0; j < rows.length; j++) {
+      (function(row, idx) {
+        row.onmouseover = function() {
+          selectedIndex = idx;
+          updateSelection();
+        };
+        row.onmousedown = function() {
+          selectSuggestion(idx);
+        };
+      })(rows[j], j);
+    }
+  }
+
+  // Update visual selection
+  function updateSelection() {
+    var rows = suggestionsBox.getElementsByTagName("tr");
+    for (var i = 0; i < rows.length; i++) {
+      if (i === selectedIndex) {
+        rows[i].className = "gssb_a gsfs gssb_i";
+      } else {
+        rows[i].className = "gssb_a gsfs";
+      }
+    }
+  }
+
+  // Select a suggestion
+  function selectSuggestion(index) {
+    if (index < 0 || index >= suggestions.length) return;
+    var sug = suggestions[index];
+    var text = typeof sug === "string" ? sug : (sug && sug[0] ? sug[0] : "");
+    if (text) {
+      input.value = text;
+      hideSuggestions();
+      // Submit the form
+      var form = document.getElementById("masthead-search");
+      if (form) form.submit();
+    }
+  }
+
+  // Hide suggestions
+  function hideSuggestions() {
+    suggestionsBox.style.display = "none";
+    suggestionsBox.innerHTML = "";
+    suggestions = [];
+    selectedIndex = -1;
+  }
+
+  // Fetch suggestions from API
+  function fetchSuggestions(query) {
+    if (!query || query.length < 1) {
+      hideSuggestions();
+      return;
+    }
+
+    if (typeof console !== "undefined" && console.log) {
+      console.log("Fetching suggestions for:", query);
+    }
+
+    // Abort previous request
+    if (xhr) {
+      try { xhr.abort(); } catch (e) {}
+      xhr = null;
+    }
+
+    try { xhr = new XMLHttpRequest(); } catch (e) { xhr = new ActiveXObject("Microsoft.XMLHTTP"); }
+    if (!xhr) return;
+
+    xhr.onreadystatechange = function() {
+      if (xhr.readyState !== 4) return;
+      
+      if (typeof console !== "undefined" && console.log) {
+        console.log("Suggestions response - status:", xhr.status, "readyState:", xhr.readyState);
+      }
+      
+      if (xhr.status !== 200) return;
+      
+      var data = safeParseJSON(xhr.responseText);
+      if (!data || !data.suggestions || data.suggestions.length === 0) {
+        if (typeof console !== "undefined" && console.log) {
+          console.log("No suggestions found");
+        }
+        hideSuggestions();
+        return;
+      }
+
+      if (typeof console !== "undefined" && console.log) {
+        console.log("Got", data.suggestions.length, "suggestions");
+      }
+
+      suggestions = data.suggestions;
+      selectedIndex = -1;
+      renderSuggestions();
+    };
+
+    var url = base + "/get_search_suggestions.php?query=" + encodeURIComponent(query);
+    if (typeof console !== "undefined" && console.log) {
+      console.log("Requesting URL:", url);
+    }
+    
+    xhr.open("GET", url, true);
+    try { xhr.withCredentials = true; } catch (e) {}
+    xhr.send();
+  }
+
+  // Debounced input handler
+  function onInput() {
+    var query = input.value;
+    if (query === currentQuery) return;
+    currentQuery = query;
+    selectedIndex = -1;
+
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+
+    if (!query || query.length < 1) {
+      hideSuggestions();
+      return;
+    }
+
+    debounceTimer = setTimeout(function() {
+      fetchSuggestions(query);
+    }, 200);
+  }
+
+  // Keyboard navigation
+  function onKeydown(e) {
+    e = e || window.event;
+    var keyCode = e.keyCode || e.which;
+
+    if (!suggestionsBox || suggestionsBox.style.display === "none") {
+      if (keyCode === 40) { // Down arrow
+        onInput();
+      }
+      return;
+    }
+
+    if (keyCode === 38) { // Up arrow
+      e.preventDefault ? e.preventDefault() : (e.returnValue = false);
+      if (selectedIndex > 0) {
+        selectedIndex--;
+        updateSelection();
+      } else if (selectedIndex === 0) {
+        selectedIndex = -1;
+        updateSelection();
+      }
+    } else if (keyCode === 40) { // Down arrow
+      e.preventDefault ? e.preventDefault() : (e.returnValue = false);
+      if (selectedIndex < suggestions.length - 1) {
+        selectedIndex++;
+        updateSelection();
+      }
+    } else if (keyCode === 13) { // Enter
+      if (selectedIndex >= 0 && selectedIndex < suggestions.length) {
+        e.preventDefault ? e.preventDefault() : (e.returnValue = false);
+        selectSuggestion(selectedIndex);
+      }
+    } else if (keyCode === 27) { // Escape
+      hideSuggestions();
+    }
+  }
+
+  // Event listeners (IE-compatible)
+  if (input.addEventListener) {
+    input.addEventListener("input", onInput, false);
+    input.addEventListener("keydown", onKeydown, false);
+    input.addEventListener("keyup", onInput, false);
+  } else if (input.attachEvent) {
+    input.attachEvent("onpropertychange", onInput);
+    input.attachEvent("onkeydown", onKeydown);
+    input.attachEvent("onkeyup", onInput);
+  }
+
+  // Hide on outside click
+  if (document.addEventListener) {
+    document.addEventListener("click", function(e) {
+      if (e.target !== input && !suggestionsBox.contains(e.target)) {
+        hideSuggestions();
+      }
+    }, false);
+  } else if (document.attachEvent) {
+    document.attachEvent("onclick", function() {
+      var target = window.event.srcElement;
+      if (target !== input && !suggestionsBox.contains(target)) {
+        hideSuggestions();
+      }
+    });
+  }
+
+  // Hide on form submit
+  var form = document.getElementById("masthead-search");
+  if (form) {
+    if (form.addEventListener) {
+      form.addEventListener("submit", hideSuggestions, false);
+    } else if (form.attachEvent) {
+      form.attachEvent("onsubmit", hideSuggestions);
+    }
+  }
 })();
 </script>
