@@ -1293,7 +1293,7 @@ async fn resolve_direct_stream_url(
         attempts.push(None);
 
         let mut last_err = None;
-		let deno_path = "D:/ytapilegacy-rust/assets/deno.exe"; 
+		let deno_path = if cfg!(target_os = "windows") { "assets/deno.exe" } else { "assets/deno" };
         for cookie in attempts {
             let mut cmd = Command::new(&yt_dlp);
             cmd.arg("-f")
