@@ -340,8 +340,10 @@ pub async fn page_root(
             config,
             main_url_trimmed,
             24,
+			None,
         )
         .await
+		.map(|resp| resp.videos)
         .unwrap_or_default(),
         None => Vec::new(),
     };

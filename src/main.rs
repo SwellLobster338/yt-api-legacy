@@ -94,6 +94,8 @@ use routes::auth::{AuthConfig, TokenStore};
             routes::actions::SubscriptionCheckRequest,
             routes::actions::SubscriptionCheckResponse,
             routes::additional::InstantItem,
+			routes::shorts::ShortItem,       
+            routes::shorts::ShortsResponse,  
         )
     ),
     tags(
@@ -105,6 +107,7 @@ struct ApiDoc;
 #[derive(Debug, Serialize)]
 struct AppState {
     config: Config,
+	
     /// Limits concurrent codec conversions (mpeg4/h263) for /direct_url.
     #[serde(skip)]
     codec_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
@@ -254,11 +257,13 @@ async fn main() -> std::io::Result<()> {
                 "/get-categories.php",
                 web::get().to(routes::search::get_categories),
             )
+			
             .route(
                 "/get-categories_videos.php",
                 web::get().to(routes::search::get_categories_videos),
             )
             .route("/playlist", web::get().to(routes::search::playlist_root))
+			
             .route(
                 "/playlist/{playlist_id}",
                 web::get().to(routes::search::get_playlist_videos),
@@ -319,6 +324,7 @@ async fn main() -> std::io::Result<()> {
                 "/get_recommendations.php",
                 web::get().to(routes::additional::get_recommendations),
             )
+			
             .route(
                 "/get_subscriptions.php",
                 web::get().to(routes::additional::get_subscriptions),
@@ -346,6 +352,10 @@ async fn main() -> std::io::Result<()> {
             .route(
                 "/check_failed_api_keys",
                 web::get().to(routes::additional::check_failed_api_keys),
+            )
+			.route(
+                "/get_shorts.php",
+                web::get().to(routes::shorts::get_shorts),
             )
             .route(
                 "/actions/subscribe",

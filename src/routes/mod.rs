@@ -8,3 +8,4 @@ pub mod middleware;
 pub mod oauth;
 pub mod search;
 pub mod video;
+pub mod shorts;

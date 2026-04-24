@@ -25,6 +25,7 @@ use tokio::sync::Mutex;
 use tokio::task;
 use urlencoding;
 use utoipa::ToSchema;
+use tokio_util::io::ReaderStream;
 
 fn base_url(req: &HttpRequest, config: &crate::config::Config) -> String {
     if !config.server.main_url.is_empty() {
@@ -452,13 +453,16 @@ fn find_likes(next_data: &serde_json::Value) -> String {
                                                                 }
                                                             }
                                                             
-                                                            if let Some(acc_text) = button_vm.get("accessibilityText").and_then(|t| t.as_str()) {
+                                                            if let Some(acc_text) = button_vm.get("accessibilityText").and_then(|t| t
+.as_str()) {
                                                                 if !acc_text.is_empty() {
-                                                                    if let Some(caps) = regex::Regex::new(r"along with ([\d, ]*) other").unwrap().captures(acc_text) {
+                                                                    if let Some(caps) = regex::Regex::new(r"along with ([\d, ]*) 
+other").unwrap().captures(acc_text) {
                                                                         let num = caps[1].replace(",", "").replace(" ", "");
                                                                         return num;
                                                                     }
-                                                                    if let Some(caps) = regex::Regex::new(r"(\d[\d, ]*)").unwrap().captures(acc_text) {
+                                                                    if let Some(caps) = regex::Regex::new(r"(\d[\d, ]*)").unwrap().
+captures(acc_text) {
                                                                         return parse_human_number(&caps[1]);
                                                                     }
                                                                 }
@@ -474,13 +478,16 @@ fn find_likes(next_data: &serde_json::Value) -> String {
                                                                 }
                                                             }
                                                             
-                                                            if let Some(acc_text) = button_vm.get("accessibilityText").and_then(|t| t.as_str()) {
+                                                            if let Some(acc_text) = button_vm.get("accessibilityText").and_then(|t| t
+.as_str()) {
                                                                 if !acc_text.is_empty() {
-                                                                    if let Some(caps) = regex::Regex::new(r"along with ([\d, ]*) other").unwrap().captures(acc_text) {
+                                                                    if let Some(caps) = regex::Regex::new(r"along with ([\d, ]*) 
+other").unwrap().captures(acc_text) {
                                                                         let num = caps[1].replace(",", "").replace(" ", "");
                                                                         return num;
                                                                     }
-                                                                    if let Some(caps) = regex::Regex::new(r"(\d[\d, ]*)").unwrap().captures(acc_text) {
+                                                                    if let Some(caps) = regex::Regex::new(r"(\d[\d, ]*)").unwrap().
+captures(acc_text) {
                                                                         return parse_human_number(&caps[1]);
                                                                     }
                                                                 }
@@ -578,14 +585,16 @@ fn find_subscriber_count(nd: &serde_json::Value) -> String {
                                                 .get("simpleText")
                                                 .and_then(|t| t.as_str())
                                                 .or_else(|| {
-                                                    sub_text.get("runs").and_then(|r| r.as_array()).and_then(|arr| arr.first()).and_then(|r| r.get("text").and_then(|t| t.as_str()))
+                                                    sub_text.get("runs").and_then(|r| r.as_array()).and_then(|arr| arr.first()).
+and_then(|r| r.get("text").and_then(|t| t.as_str()))
                                                 });
                                             if let Some(simple_text) = text {
-                                                let cleaned = simple_text.replace(" подписчиков", "").replace(" подписчик", "").replace(" subscribers", "").replace(" subscriber", "");
+                                                let cleaned = simple_text.replace(" подписчиков", "").replace(" подписчик", "").
+replace(" subscribers", "").replace(" subscriber", "");
                                                 
                                                 let re = regex::Regex::new(r"([\d,]+\.?\d*)\s*(млн|тыс|[KM]?)").unwrap();
                                                 if let Some(captures) = re.captures(&cleaned) {
-                                                    let number_part = &captures[1].replace(",", "").replace(".", ""); // Remove commas and dots
+                                                    let number_part = &captures[1].replace(",", "").replace(".", ""); // Removecommas and dots
                                                     let multiplier = &captures[2];
                                                     
                                                     if let Ok(number) = number_part.parse::<f64>() {
@@ -1262,12 +1271,19 @@ async fn resolve_direct_stream_url(
 
     task::spawn_blocking(move || {
         let url = format!("https://www.youtube.com/watch?v={}", video_id);
-        let format_selector = if audio_only {
-            "bestaudio/best".to_string()
+        let numeric_height = parse_quality_height(&quality).unwrap_or(360);
+		let format_selector = if audio_only {
+            // Добавляем .to_string(), чтобы типы совпали
+            "140/bestaudio[ext=m4a]/bestaudio".to_string()
         } else {
-            // Превращаем "1080p" в число 1080, чтобы yt-dlp не выдал ошибку синтаксиса
             let numeric_height = parse_quality_height(&quality).unwrap_or(360);
-            format!("best[height<={}][ext=mp4]/best[ext=mp4]/best", numeric_height)
+            if numeric_height <= 360 {
+                "18/best[height<=360][ext=mp4][vcodec^=avc1]/best[ext=mp4]".to_string()
+            } else if numeric_height <= 720 {
+                "22/18/best[height<=720][ext=mp4][vcodec^=avc1]/best[ext=mp4]".to_string()
+            } else {
+                format!("bestvideo[height<={}][ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/best[ext=mp4]", numeric_height)
+            }
         };
 
         let mut attempts: Vec<Option<PathBuf>> = Vec::new();
@@ -1277,12 +1293,20 @@ async fn resolve_direct_stream_url(
         attempts.push(None);
 
         let mut last_err = None;
+		let deno_path = "D:/ytapilegacy-rust/assets/deno.exe"; 
         for cookie in attempts {
             let mut cmd = Command::new(&yt_dlp);
             cmd.arg("-f")
                 .arg(&format_selector)
+				.arg("--remote-components").arg("ejs:github")
+				.arg("--js-runtimes").arg(format!("deno:{}", deno_path))
                 .arg("--get-url")
-                .arg(&url);
+				//.arg("--postprocessor-args")
+				//.arg("ffmpeg:-movflags +faststart")
+				.arg("--youtube-skip-dash-manifest") // Пропускать DASH
+				.arg("--youtube-skip-hls-manifest")  // Пропускать HLS (m3u8)
+				.arg("--no-playlist")
+				.arg(&url);								
 
             if let Some(ref path) = cookie {
                 cmd.arg("--cookies").arg(path);
@@ -1292,8 +1316,9 @@ async fn resolve_direct_stream_url(
                 Ok(output) if output.status.success() => {
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     if let Some(line) = stdout.lines().find(|l| !l.trim().is_empty()) {
-                        return Ok(line.to_string());
-                    }
+						// .trim() убирает все лишние символы переноса и пробелы
+						return Ok(line.trim().to_string()); 
+						}
                     last_err = Some("yt-dlp returned empty output".to_string());
                 }
                 Ok(output) => {
@@ -1604,7 +1629,8 @@ pub async fn channel_icon(
     }
 
     let client = Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+)
         .build()
         .unwrap();
 
@@ -1888,13 +1914,16 @@ pub async fn get_ytvideo_info(
                                     
                                     if let Some(nav_endpoint) = owner.get("navigationEndpoint") {
                                         if let Some(browse_endpoint) = nav_endpoint.get("browseEndpoint") {
-                                            channel_id = browse_endpoint.get("browseId").and_then(|b| b.as_str()).unwrap_or("").to_string();
+                                            channel_id = browse_endpoint.get("browseId").and_then(|b| b.as_str()).unwrap_or("").
+to_string();
                                         }
                                     }
                                     
-                                    if let Some(thumbnails) = owner.get("thumbnail").and_then(|t| t.get("thumbnails")).and_then(|arr| arr.as_array()) {
+                                    if let Some(thumbnails) = owner.get("thumbnail").and_then(|t| t.get("thumbnails")).and_then(|arr|
+ arr.as_array()) {
                                         if !thumbnails.is_empty() {
-                                            channel_thumbnail = thumbnails[0].get("url").and_then(|u| u.as_str()).unwrap_or("").to_string();
+                                            channel_thumbnail = thumbnails[0].get("url").and_then(|u| u.as_str()).unwrap_or("").
+to_string();
                                         }
                                     }
                                 }
@@ -2010,7 +2039,8 @@ pub async fn get_ytvideo_info(
         ("count" = Option<i32>, Query, description = "Number of related videos to return (default: 50)"),
         ("offset" = Option<i32>, Query, description = "Offset for pagination (default: 0)"),
         ("limit" = Option<i32>, Query, description = "Limit for pagination (default: 50)"),
-        ("order" = Option<String>, Query, description = "Order of results (relevance, date, rating, viewCount, title) (default: relevance)"),
+        ("order" = Option<String>, Query, description = "Order of results (relevance, date, rating, viewCount, title) (default: 
+relevance)"),
         ("token" = Option<String>, Query, description = "Refresh token for InnerTube recommendations")
     ),
     responses(
@@ -2087,7 +2117,8 @@ pub async fn get_related_videos(
     let watch_url = format!("https://www.youtube.com/watch?v={}", video_id);
     let headers_map = {
         let mut map = reqwest::header::HeaderMap::new();
-        map.insert(reqwest::header::USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/121.0.0.0 Safari/537.36".parse().unwrap());
+        map.insert(reqwest::header::USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/121.0.0.0 Safari/537.36".parse().
+unwrap());
         map.insert(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9".parse().unwrap());
         map.insert(reqwest::header::CONTENT_TYPE, "application/json".parse().unwrap());
         map
@@ -2290,7 +2321,8 @@ pub async fn get_direct_video_url(
         ("video_id" = String, Query, description = "YouTube video ID"),
         ("quality" = Option<String>, Query, description = "Preferred quality"),
         ("proxy" = Option<String>, Query, description = "Pass-through proxy (true/false)"),
-        ("codec" = Option<String>, Query, description = "Video codec for optional conversion: mpeg4 or h263. If passed, quality will be 360p")
+        ("codec" = Option<String>, Query, description = "Video codec for optional conversion: mpeg4 or h263. If passed, quality will 
+be 360p")
     ),
     responses(
         (status = 200, description = "Video stream"),
@@ -2347,7 +2379,21 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
         }
 
 		let direct_url = match resolve_direct_stream_url(&video_id, Some("360"), false, &data.config).await {
-			Ok(url) => url,
+			Ok(url) => {
+            // ВАЖНО: Если сервер вернул HLS-ссылку (m3u8), а мы хотим MP4 - 
+            // это значит, что мы получили не то, что нужно. 
+            // Нужно принудительно переключиться на прямое скачивание MP4 через yt-dlp.
+            if url.contains(".m3u8") {
+                log::warn!("YT-DLP вернул HLS для {}, форсируем MP4-поиск...", video_id);
+                // Попробуем еще раз, но без указания качества (возьмем "best")
+                match resolve_direct_stream_url(&video_id, None, false, &data.config).await {
+                    Ok(u) => u,
+                    Err(_) => url, // Если не вышло, оставляем как есть
+                }
+            } else {
+                url
+            }
+        },
 			Err(e) => {
 				return HttpResponse::InternalServerError().json(serde_json::json!({
 					"error": "Failed to resolve video url for conversion",
@@ -3023,59 +3069,47 @@ fn serve_mp4_from_cache(
         }
         return builder.finish();
     }
-    let range_header = req.headers().get("Range").and_then(|v| v.to_str().ok());
-    let (start, end, status, content_range) = if let Some(range) = range_header {
-        let mut start = 0u64;
-        let mut end = file_size.saturating_sub(1);
+     let range_header = req.headers().get("Range").and_then(|v| v.to_str().ok());
+    let (start, end, status) = if let Some(range) = range_header {
         if let Some(cap) = regex::Regex::new(r"bytes=(\d+)-(\d*)").ok().and_then(|r| r.captures(range)) {
-            if let Some(s) = cap.get(1).and_then(|m| m.as_str().parse::<u64>().ok()) {
-                start = s.min(file_size.saturating_sub(1));
-            }
-            if let Some(m) = cap.get(2).map(|m| m.as_str()) {
-                if !m.is_empty() {
-                    if let Ok(e) = m.parse::<u64>() {
-                        end = e.min(file_size.saturating_sub(1));
-                    }
-                }
-            }
+            let s = cap.get(1).and_then(|m| m.as_str().parse::<u64>().ok()).unwrap_or(0);
+            let e = cap.get(2).and_then(|m| m.as_str().parse::<u64>().ok()).unwrap_or(file_size - 1);
+            (s, e.min(file_size - 1), actix_web::http::StatusCode::PARTIAL_CONTENT)
+        } else {
+            (0, file_size - 1, actix_web::http::StatusCode::OK)
         }
-        let content_range_val = format!("bytes {}-{}/{}", start, end, file_size);
-        (start, end, actix_web::http::StatusCode::PARTIAL_CONTENT, Some(content_range_val))
     } else {
-        (0, file_size.saturating_sub(1), actix_web::http::StatusCode::OK, None)
+        (0, file_size - 1, actix_web::http::StatusCode::OK)
     };
-    let start = start;
-    let end = end;
-    let content_range = content_range;
-    let body = match fs::File::open(path) {
-        Ok(mut f) => {
-            let _ = f.seek(std::io::SeekFrom::Start(start));
-            let len = end.saturating_sub(start) + 1;
-            let mut buf = vec![0u8; len as usize];
-            if let Ok(n) = f.read(&mut buf) {
-                buf.truncate(n);
-            }
-            buf
-        }
+
+    // Открываем файл асинхронно через tokio
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
         Err(_) => return HttpResponse::InternalServerError().finish(),
     };
+    
+    // Используем файловый поток вместо загрузки в Vec<u8>
+    let mut f = tokio::fs::File::from_std(file);
+    let stream = ReaderStream::with_capacity(
+        tokio::io::BufReader::new(f), 
+        65536 // Читаем по 64 КБ
+    );
+
     let mut builder = HttpResponse::build(status);
     builder
-        .insert_header((CONTENT_TYPE, HeaderValue::from_static("video/mp4")))
+        .insert_header((CONTENT_TYPE, "video/mp4"))
         .insert_header(("Accept-Ranges", "bytes"))
-        .insert_header((CONTENT_LENGTH, body.len()));
-    if let Some(cr) = content_range {
-        builder.insert_header((CONTENT_RANGE, cr));
+        .insert_header((CONTENT_LENGTH, (end - start + 1).to_string()));
+
+    if status == actix_web::http::StatusCode::PARTIAL_CONTENT {
+        builder.insert_header((CONTENT_RANGE, format!("bytes {}-{}/{}", start, end, file_size)));
     }
+
     if let Some(secs) = duration_seconds {
-        let s = secs.to_string();
-        builder
-            .insert_header(("X-Content-Duration", s.as_str()))
-            .insert_header(("Content-Duration", s.as_str()))
-            .insert_header(("X-Video-Duration", s.as_str()))
-            .insert_header(("X-Duration-Seconds", s.as_str()));
+        builder.insert_header(("X-Duration-Seconds", secs.to_string()));
     }
-    builder.body(body)
+
+    builder.streaming(stream)
 }
 
 async fn get_channel_id_from_video(
@@ -3172,7 +3206,8 @@ async fn proxy_image(url: &str) -> HttpResponse {
     let processed_url = url.replace("s900", "s88");
     
     let client = Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+)
         .build()
         .unwrap();
 
