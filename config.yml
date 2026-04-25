@@ -47,6 +47,8 @@ cache:
 logging:
   enabled: true
   directory: "logs"
+download:
+  temp_dir: "/tmp"
 instances:
 - https://yt.legacyprojects.ru
 - https://yt.modyleprojects.ru
