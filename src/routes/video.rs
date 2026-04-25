@@ -1252,8 +1252,11 @@ async fn direct_url_cleanup_loop(custom_temp_dir: Option<PathBuf>) {
     let interval = Duration::from_secs(900);
     loop {
         tokio::time::sleep(interval).await;
-        let custom = custom_temp_dir.as_deref();
-        let _ = task::spawn_blocking(move || clean_direct_url_temp_files(custom)).await;
+        let dir = custom_temp_dir.clone();            
+        let _ = task::spawn_blocking(move || {
+            clean_direct_url_temp_files(dir.as_deref()) 
+        })
+        .await;
     }
 }
 
