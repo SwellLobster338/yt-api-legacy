@@ -72,7 +72,27 @@ async fn download_mux_to_temp_file(
     video_id: String,
     height: u32,
 ) -> Result<PathBuf, String> {
-    let temp_dir = env::temp_dir();
+	
+// Определяем временную папку:
+// 1. Из конфигурации (config.download.temp_dir), если указана.
+// 2. Иначе используем системную временную папку.
+let temp_dir = match &config.download.temp_dir {
+    Some(custom_tmp) if !custom_tmp.trim().is_empty() => {
+        let path = PathBuf::from(custom_tmp);
+        // Создаём папку, если её нет
+        if let Err(e) = fs::create_dir_all(&path) {
+            log::warn!(
+                "Не удалось создать указанную временную папку '{}': {}. Использую системную.",
+                custom_tmp,
+                e
+            );
+            env::temp_dir()
+        } else {
+            path
+        }
+    }
+    _ => env::temp_dir(),
+};
 
     let final_file_name = format!("yt_api_video_{}_{}p.mp4", video_id, height);
     let final_path = temp_dir.join(&final_file_name);
