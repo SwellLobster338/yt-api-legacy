@@ -218,6 +218,12 @@ pub struct CacheConfig {
 #[serde(transparent)]
 pub struct InstantInstance(pub String);
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadConfig {
+    #[serde(default)]
+    pub temp_dir: Option<String>,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, ToSchema)]
 pub struct Config {
     pub server: ServerConfig,
