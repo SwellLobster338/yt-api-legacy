@@ -86,7 +86,6 @@ impl Default for InnertubeClientConfig {
 }
 
 impl InnertubeClientConfig {
-    /// Объект context.client для запроса к youtubei/v1/player (camelCase ключи).
     pub fn to_player_context_value(&self) -> serde_json::Value {
         serde_json::json!({
             "clientName": self.client_name,
@@ -204,25 +203,35 @@ impl Default for ProxyConfig {
     }
 }
 
+
 #[derive(Debug, Deserialize, Serialize, Clone, ToSchema)]
 pub struct CacheConfig {
     #[serde(rename = "temp_folder_max_size_mb")]
     #[serde(default = "temp_folder_max_size_mb")]
     pub temp_folder_max_size_mb: u32,
+
     #[serde(rename = "cleanup_threshold_mb")]
     #[serde(default = "cleanup_threshold_mb")]
     pub cleanup_threshold_mb: u32,
+
+
+    #[serde(default)]
+    pub temp_dir: Option<String>,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            temp_folder_max_size_mb: temp_folder_max_size_mb(),
+            cleanup_threshold_mb: cleanup_threshold_mb(),
+            temp_dir: None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, ToSchema)]
 #[serde(transparent)]
 pub struct InstantInstance(pub String);
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DownloadConfig {
-    #[serde(default)]
-    pub temp_dir: Option<String>,
-}
 
 #[derive(Debug, Deserialize, Serialize, Clone, ToSchema)]
 pub struct Config {
