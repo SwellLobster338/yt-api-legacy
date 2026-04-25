@@ -68,11 +68,29 @@ fn extract_initial_player_response(html: &str) -> serde_json::Value {
     serde_json::Value::Object(serde_json::Map::new())
 }
 
+
 async fn download_mux_to_temp_file(
     video_id: String,
     height: u32,
+    cache: &crate::config::CacheConfig,
 ) -> Result<PathBuf, String> {
-    let temp_dir = env::temp_dir();
+    // Определяем временную папку из конфига или системную
+    let temp_dir = match &cache.temp_dir {
+        Some(dir) if !dir.trim().is_empty() => {
+            let p = PathBuf::from(dir);
+            if let Err(e) = fs::create_dir_all(&p) {
+                log::warn!(
+                    "Не удалось создать указанную временную папку '{}': {}. Использую системную.",
+                    dir,
+                    e
+                );
+                env::temp_dir()
+            } else {
+                p
+            }
+        }
+        _ => env::temp_dir(),
+    };
 
     let final_file_name = format!("yt_api_video_{}_{}p.mp4", video_id, height);
     let final_path = temp_dir.join(&final_file_name);
@@ -147,12 +165,10 @@ async fn download_mux_to_temp_file(
     let ffmpeg_location_arg: Option<String> = {
         let p = Path::new(&ffmpeg);
         if p.is_absolute() {
-            // Full path known — pass the parent directory (yt-dlp wants a dir)
             p.parent()
                 .map(|d| d.to_string_lossy().to_string())
                 .filter(|s| !s.is_empty())
         } else {
-            // Just "ffmpeg" — it's in PATH; don't pass --ffmpeg-location at all
             None
         }
     };
@@ -184,7 +200,6 @@ async fn download_mux_to_temp_file(
         cmd.arg("-N").arg("4");
         cmd.arg("--output").arg(&output_template_str);
 
-        // Only pass --ffmpeg-location when we have a real directory
         if let Some(ref loc) = ffmpeg_location_arg {
             cmd.arg("--ffmpeg-location").arg(loc);
         }
@@ -211,7 +226,6 @@ async fn download_mux_to_temp_file(
             .output()
             .map_err(|e| format!("Failed to execute yt-dlp: {}", e))?;
 
-        // Always log yt-dlp output so problems are visible in logs
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         if !stdout.trim().is_empty() {
@@ -226,16 +240,11 @@ async fn download_mux_to_temp_file(
             return Err(format!("yt-dlp error: {}", stderr));
         }
 
-        // --- Fast path: expected .mp4 file exists ---
         if final_path.exists() {
             log::info!("yt-dlp produced expected file: {}", final_path.display());
             return Ok(final_path);
         }
 
-        // --- Recovery path: yt-dlp succeeded but wrote a different extension ---
-        // This happens when merge fell back to a container yt-dlp chose on its own
-        // (e.g. .mkv, .webm). Scan the temp dir for any file whose stem matches and
-        // remux to mp4 using ffmpeg.
         log::warn!(
             "Expected file not found: {}. Scanning temp dir for alternate extension...",
             final_path.display()
@@ -253,7 +262,7 @@ async fn download_mux_to_temp_file(
                             name.starts_with(&output_stem)
                                 && !name.ends_with(".lock")
                                 && !name.ends_with(".part")
-                                && !name.contains(".f")     // skip .f137.mp4 partial files
+                                && !name.contains(".f")
                                 && p.extension()
                                     .and_then(|e| e.to_str())
                                     .map(|ext| ext != "mp4")
@@ -287,7 +296,7 @@ async fn download_mux_to_temp_file(
                 match remux_status {
                     Ok(s) if s.success() => {
                         log::info!("Remux successful: {}", final_path.display());
-                        let _ = fs::remove_file(&src); // clean up source
+                        let _ = fs::remove_file(&src);
                         Ok(final_path)
                     }
                     Ok(s) => {
@@ -453,16 +462,13 @@ fn find_likes(next_data: &serde_json::Value) -> String {
                                                                 }
                                                             }
                                                             
-                                                            if let Some(acc_text) = button_vm.get("accessibilityText").and_then(|t| t
-.as_str()) {
+                                                            if let Some(acc_text) = button_vm.get("accessibilityText").and_then(|t| t.as_str()) {
                                                                 if !acc_text.is_empty() {
-                                                                    if let Some(caps) = regex::Regex::new(r"along with ([\d, ]*) 
-other").unwrap().captures(acc_text) {
+                                                                    if let Some(caps) = regex::Regex::new(r"along with ([\d, ]*) other").unwrap().captures(acc_text) {
                                                                         let num = caps[1].replace(",", "").replace(" ", "");
                                                                         return num;
                                                                     }
-                                                                    if let Some(caps) = regex::Regex::new(r"(\d[\d, ]*)").unwrap().
-captures(acc_text) {
+                                                                    if let Some(caps) = regex::Regex::new(r"(\d[\d, ]*)").unwrap().captures(acc_text) {
                                                                         return parse_human_number(&caps[1]);
                                                                     }
                                                                 }
@@ -478,16 +484,13 @@ captures(acc_text) {
                                                                 }
                                                             }
                                                             
-                                                            if let Some(acc_text) = button_vm.get("accessibilityText").and_then(|t| t
-.as_str()) {
+                                                            if let Some(acc_text) = button_vm.get("accessibilityText").and_then(|t| t.as_str()) {
                                                                 if !acc_text.is_empty() {
-                                                                    if let Some(caps) = regex::Regex::new(r"along with ([\d, ]*) 
-other").unwrap().captures(acc_text) {
+                                                                    if let Some(caps) = regex::Regex::new(r"along with ([\d, ]*) other").unwrap().captures(acc_text) {
                                                                         let num = caps[1].replace(",", "").replace(" ", "");
                                                                         return num;
                                                                     }
-                                                                    if let Some(caps) = regex::Regex::new(r"(\d[\d, ]*)").unwrap().
-captures(acc_text) {
+                                                                    if let Some(caps) = regex::Regex::new(r"(\d[\d, ]*)").unwrap().captures(acc_text) {
                                                                         return parse_human_number(&caps[1]);
                                                                     }
                                                                 }
@@ -553,7 +556,7 @@ fn parse_human_number(s: &str) -> String {
                         return ((num * 1000000000.0).round() as i64).to_string();
                     }
                 },
-                _ => {} // Not a recognized multiplier
+                _ => {}
             }
         }
     }
@@ -585,25 +588,23 @@ fn find_subscriber_count(nd: &serde_json::Value) -> String {
                                                 .get("simpleText")
                                                 .and_then(|t| t.as_str())
                                                 .or_else(|| {
-                                                    sub_text.get("runs").and_then(|r| r.as_array()).and_then(|arr| arr.first()).
-and_then(|r| r.get("text").and_then(|t| t.as_str()))
+                                                    sub_text.get("runs").and_then(|r| r.as_array()).and_then(|arr| arr.first()).and_then(|r| r.get("text").and_then(|t| t.as_str()))
                                                 });
                                             if let Some(simple_text) = text {
-                                                let cleaned = simple_text.replace(" подписчиков", "").replace(" подписчик", "").
-replace(" subscribers", "").replace(" subscriber", "");
+                                                let cleaned = simple_text.replace(" подписчиков", "").replace(" подписчик", "").replace(" subscribers", "").replace(" subscriber", "");
                                                 
                                                 let re = regex::Regex::new(r"([\d,]+\.?\d*)\s*(млн|тыс|[KM]?)").unwrap();
                                                 if let Some(captures) = re.captures(&cleaned) {
-                                                    let number_part = &captures[1].replace(",", "").replace(".", ""); // Removecommas and dots
+                                                    let number_part = &captures[1].replace(",", "").replace(".", "");
                                                     let multiplier = &captures[2];
                                                     
                                                     if let Ok(number) = number_part.parse::<f64>() {
                                                         let result = match multiplier {
-                                                            "млн" => (number * 1000000.0) as u64, // Russian million
-                                                            "тыс" => (number * 1000.0) as u64,    // Russian thousand
-                                                            "K" => (number * 1000.0) as u64,      // English thousand
-                                                            "M" => (number * 1000000.0) as u64,   // English million
-                                                            _ => number as u64,                   // No multiplier
+                                                            "млн" => (number * 1000000.0) as u64,
+                                                            "тыс" => (number * 1000.0) as u64,
+                                                            "K" => (number * 1000.0) as u64,
+                                                            "M" => (number * 1000000.0) as u64,
+                                                            _ => number as u64,
                                                         };
                                                         return result.to_string();
                                                     }
@@ -803,7 +804,7 @@ fn extract_comments(data: &serde_json::Value, base_url: &str) -> Vec<Comment> {
                     
                     comments.push(Comment {
                         author,
-                        text: text.trim().to_string(),  // Only trim if necessary
+                        text: text.trim().to_string(),
                         published_at,
                         author_thumbnail,
                         author_channel_url: None,
@@ -836,7 +837,6 @@ const CACHE_DURATION: u64 = 3600;
 fn ffmpeg_binary() -> String {
     let exe_name = if cfg!(target_os = "windows") { "ffmpeg.exe" } else { "ffmpeg" };
 
-    // 1. Ищем в текущей рабочей папке (откуда запущен cargo run)
     if let Ok(cwd) = std::env::current_dir() {
         let direct_path = cwd.join(exe_name);
         if direct_path.exists() {
@@ -848,7 +848,6 @@ fn ffmpeg_binary() -> String {
         }
     }
 
-    // 2. Ищем рядом с самим скомпилированным бинарником (полезно для продакшена)
     if let Ok(mut exe_dir) = std::env::current_exe() {
         exe_dir.pop();
         let direct_path = exe_dir.join(exe_name);
@@ -861,12 +860,10 @@ fn ffmpeg_binary() -> String {
         }
     }
 
-    // 3. Fallback: надеемся, что ffmpeg есть в PATH
     exe_name.to_string()
 }
 
 fn get_duration_from_player_response(data: &serde_json::Value) -> u64 {
-    // Пытаемся достать длительность из videoDetails
     if let Some(seconds_str) = data.get("videoDetails")
         .and_then(|vd| vd.get("lengthSeconds"))
         .and_then(|v| v.as_str()) 
@@ -875,7 +872,6 @@ fn get_duration_from_player_response(data: &serde_json::Value) -> u64 {
             return secs;
         }
     }
-    // Фолбек: из microformat
     if let Some(seconds_str) = data.get("microformat")
         .and_then(|m| m.get("playerMicroformatRenderer"))
         .and_then(|p| p.get("lengthSeconds"))
@@ -885,7 +881,7 @@ fn get_duration_from_player_response(data: &serde_json::Value) -> u64 {
             return secs;
         }
     }
-    0 // Если не нашли, считаем видео коротким/потоком
+    0
 }
 
 fn yt_dlp_binary() -> String {
@@ -1007,12 +1003,14 @@ fn parse_quality_height(quality: &str) -> Option<u32> {
     aliases.get(s.as_str()).copied()
 }
 
+
 fn stream_converted_video(
     source_url: &str,
     user_agent: &str,
     _video_id: &str,
     codec: &str,
     _permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    temp_dir: PathBuf,
 ) -> HttpResponse {
     let source_url = source_url.to_string();
     let ua = user_agent.to_string();
@@ -1022,8 +1020,7 @@ fn stream_converted_video(
     let ffmpeg = ffmpeg_binary();
 
     std::thread::spawn(move || {
-        let _permit = _permit; // Hold semaphore permit
-        let temp_dir = env::temp_dir();
+        let _permit = _permit;
         let temp_file_name = format!(
             "yt_api_video_{}_{}.{}",
             SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis(),
@@ -1032,8 +1029,6 @@ fn stream_converted_video(
         );
         let temp_file_path = temp_dir.join(temp_file_name);
 
-        // 1. Download the stream using Rust (reqwest::blocking) instead of FFmpeg
-        // We move the network logic that caused the crash out of FFmpeg
         let client = reqwest::blocking::Client::new();
         let download_result = client
             .get(&source_url)
@@ -1053,14 +1048,11 @@ fn stream_converted_video(
             }
         };
 
-        // 2. Prepare FFmpeg to read from STDIN (pipe:0)
         let mut cmd = Command::new(&ffmpeg);
         cmd.args([
             "-y",
             "-hide_banner", "-loglevel", "error",
-            // REMOVED: -nostdin (we need stdin!)
-            // REMOVED: -reconnect, -user_agent, -headers, -i URL (network args)
-            "-i", "pipe:0", // Read from Stdin
+            "-i", "pipe:0",
         ]);
 
         if codec_str == "mpeg4" {
@@ -1079,8 +1071,6 @@ fn stream_converted_video(
 
         let temp_path_str = temp_file_path.to_string_lossy().to_string();
         cmd.arg(&temp_path_str);
-
-        // Configure Stdin to be piped
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let mut child = match cmd.spawn() {
@@ -1094,17 +1084,14 @@ fn stream_converted_video(
             }
         };
 
-        // 3. Pipe data from HTTP response to FFmpeg stdin
-        // We take() stdin here to get the handle
         if let Some(mut stdin) = child.stdin.take() {
             let mut buffer = [0u8; 8192];
             loop {
                 match response.read(&mut buffer) {
-                    Ok(0) => break, // EOF
+                    Ok(0) => break,
                     Ok(n) => {
                         if stdin.write_all(&buffer[..n]).is_err() {
-                            // FFmpeg might have closed stdin early (error or finished)
-                            break; 
+                            break;
                         }
                     }
                     Err(e) => {
@@ -1113,10 +1100,8 @@ fn stream_converted_video(
                     }
                 }
             }
-        } 
-        // Drop stdin handle to signal EOF to FFmpeg
+        }
 
-        // 4. Wait for FFmpeg to finish
         let output = match child.wait_with_output() {
             Ok(o) => o,
             Err(e) => {
@@ -1143,7 +1128,6 @@ fn stream_converted_video(
             return;
         }
 
-        // 5. Stream the resulting file back (Same logic as before)
         match fs::File::open(&temp_file_path) {
             Ok(mut file) => {
                 let mut buffer = [0u8; 65536];
@@ -1176,15 +1160,16 @@ fn stream_converted_video(
         .streaming(stream)
 }
 
-/// Removes old temp files created by direct_url: `yt_api_video_*` in temp_dir (older than 1h),
-/// and files in `yt_api_hls_cache` older than 24h.
-fn clean_direct_url_temp_files() {
-    let temp_dir = env::temp_dir();
-    let now = SystemTime::now();
-    let max_age_video = Duration::from_secs(3600);   // 1 hour for codec conversion temp files
-    let max_age_hls = Duration::from_secs(86400);   // 24 hours for HLS cache
 
-    if let Ok(entries) = fs::read_dir(&temp_dir) {
+fn clean_direct_url_temp_files(custom_temp_dir: Option<&Path>) {
+    // Системная временная папка чистится всегда
+    let system_temp = env::temp_dir();
+    let now = SystemTime::now();
+    let max_age_video = Duration::from_secs(3600);
+    let max_age_hls = Duration::from_secs(86400);
+
+    // Очистка системной временной папки
+    if let Ok(entries) = fs::read_dir(&system_temp) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_file() {
@@ -1204,7 +1189,7 @@ fn clean_direct_url_temp_files() {
         }
     }
 
-    let hls_cache = temp_dir.join("yt_api_hls_cache");
+    let hls_cache = system_temp.join("yt_api_hls_cache");
     if hls_cache.is_dir() {
         if let Ok(entries) = fs::read_dir(&hls_cache) {
             for entry in entries.flatten() {
@@ -1220,22 +1205,67 @@ fn clean_direct_url_temp_files() {
             }
         }
     }
-}
 
-async fn direct_url_cleanup_loop() {
-    let interval = Duration::from_secs(900); // 15 minutes
-    loop {
-        tokio::time::sleep(interval).await;
-        let _ = task::spawn_blocking(clean_direct_url_temp_files).await;
+    // Очистка пользовательской временной папки (если задана)
+    if let Some(custom) = custom_temp_dir {
+        if custom.is_dir() {
+            if let Ok(entries) = fs::read_dir(custom) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            if name.starts_with("yt_api_video_") && (name.ends_with(".mp4") || name.ends_with(".3gp")) {
+                                if let Ok(meta) = fs::metadata(&path) {
+                                    if let Ok(mtime) = meta.modified() {
+                                        if now.duration_since(mtime).unwrap_or(Duration::MAX) > max_age_video {
+                                            let _ = fs::remove_file(&path);
+                                            log::debug!("direct_url cleanup: removed old temp {}", path.display());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let hls_custom = custom.join("yt_api_hls_cache");
+            if hls_custom.is_dir() {
+                if let Ok(entries) = fs::read_dir(&hls_custom) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if let Ok(meta) = fs::metadata(&path) {
+                            if let Ok(mtime) = meta.modified() {
+                                if now.duration_since(mtime).unwrap_or(Duration::MAX) > max_age_hls {
+                                    let _ = fs::remove_file(&path);
+                                    log::debug!("direct_url cleanup: removed old hls cache {}", path.display());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
-fn spawn_direct_url_cleanup_if_needed() {
+async fn direct_url_cleanup_loop(custom_temp_dir: Option<PathBuf>) {
+    let interval = Duration::from_secs(900);
+    loop {
+        tokio::time::sleep(interval).await;
+        let dir = custom_temp_dir.clone();            
+        let _ = task::spawn_blocking(move || {
+            clean_direct_url_temp_files(dir.as_deref()) 
+        })
+        .await;
+    }
+}
+
+fn spawn_direct_url_cleanup_if_needed(custom_temp_dir: Option<PathBuf>) {
     if DIRECT_URL_CLEANUP_STARTED
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_ok()
     {
-        actix_web::rt::spawn(direct_url_cleanup_loop());
+        actix_web::rt::spawn(direct_url_cleanup_loop(custom_temp_dir));
     }
 }
 
@@ -1273,7 +1303,6 @@ async fn resolve_direct_stream_url(
         let url = format!("https://www.youtube.com/watch?v={}", video_id);
         let numeric_height = parse_quality_height(&quality).unwrap_or(360);
 		let format_selector = if audio_only {
-            // Добавляем .to_string(), чтобы типы совпали
             "140/bestaudio[ext=m4a]/bestaudio".to_string()
         } else {
             let numeric_height = parse_quality_height(&quality).unwrap_or(360);
@@ -1301,10 +1330,8 @@ async fn resolve_direct_stream_url(
 				.arg("--remote-components").arg("ejs:github")
 				.arg("--js-runtimes").arg(format!("deno:{}", deno_path))
                 .arg("--get-url")
-				//.arg("--postprocessor-args")
-				//.arg("ffmpeg:-movflags +faststart")
-				.arg("--youtube-skip-dash-manifest") // Пропускать DASH
-				.arg("--youtube-skip-hls-manifest")  // Пропускать HLS (m3u8)
+				.arg("--youtube-skip-dash-manifest")
+				.arg("--youtube-skip-hls-manifest")
 				.arg("--no-playlist")
 				.arg(&url);								
 
@@ -1316,7 +1343,6 @@ async fn resolve_direct_stream_url(
                 Ok(output) if output.status.success() => {
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     if let Some(line) = stdout.lines().find(|l| !l.trim().is_empty()) {
-						// .trim() убирает все лишние символы переноса и пробелы
 						return Ok(line.trim().to_string()); 
 						}
                     last_err = Some("yt-dlp returned empty output".to_string());
@@ -1418,7 +1444,6 @@ pub struct VideoInfoResponse {
     pub channel_custom_url: Option<String>,
     pub description: String,
     pub video_id: String,
-    /// Raw duration in seconds when available (for HTML5 player config).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub length_seconds: Option<u64>,
     pub embed_url: String,
@@ -1629,8 +1654,7 @@ pub async fn channel_icon(
     }
 
     let client = Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-)
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
         .build()
         .unwrap();
 
@@ -1663,14 +1687,14 @@ pub async fn channel_icon(
         if let Ok(resp) = client.get(&page_url).send().await {
             if let Ok(html) = resp.text().await {
                 if let Some(start) = html.find(r#""channelId":"UC"#) {
-                    let slice = &html[start + 13..]; // после "channelId":"
+                    let slice = &html[start + 13..];
                     if let Some(end) = slice.find('"') {
                         channel_id = slice[..end].to_string();
                     }
                 }
                 if channel_id.is_empty() {
                     if let Some(pos) = html.find(r#"<link rel="canonical" href="https://www.youtube.com/channel/"#) {
-                        let slice = &html[pos + 47..]; // длина префикса
+                        let slice = &html[pos + 47..];
                         if let Some(end) = slice.find('"') {
                             channel_id = slice[..end].to_string();
                         }
@@ -1790,8 +1814,8 @@ pub async fn get_ytvideo_info(
     });
     
     if let Some(client) = ctx.get_mut("client").and_then(|c| c.as_object_mut()) {
-        client.insert("gl".to_string(), serde_json::Value::String("US".to_string())); // Set region to USA
-        client.insert("hl".to_string(), serde_json::Value::String("en-US".to_string())); // Set language to English (USA)
+        client.insert("gl".to_string(), serde_json::Value::String("US".to_string()));
+        client.insert("hl".to_string(), serde_json::Value::String("en-US".to_string()));
     }
     
     let next_payload = serde_json::json!({
@@ -1914,16 +1938,13 @@ pub async fn get_ytvideo_info(
                                     
                                     if let Some(nav_endpoint) = owner.get("navigationEndpoint") {
                                         if let Some(browse_endpoint) = nav_endpoint.get("browseEndpoint") {
-                                            channel_id = browse_endpoint.get("browseId").and_then(|b| b.as_str()).unwrap_or("").
-to_string();
+                                            channel_id = browse_endpoint.get("browseId").and_then(|b| b.as_str()).unwrap_or("").to_string();
                                         }
                                     }
                                     
-                                    if let Some(thumbnails) = owner.get("thumbnail").and_then(|t| t.get("thumbnails")).and_then(|arr|
- arr.as_array()) {
+                                    if let Some(thumbnails) = owner.get("thumbnail").and_then(|t| t.get("thumbnails")).and_then(|arr| arr.as_array()) {
                                         if !thumbnails.is_empty() {
-                                            channel_thumbnail = thumbnails[0].get("url").and_then(|u| u.as_str()).unwrap_or("").
-to_string();
+                                            channel_thumbnail = thumbnails[0].get("url").and_then(|u| u.as_str()).unwrap_or("").to_string();
                                         }
                                     }
                                 }
@@ -2039,8 +2060,7 @@ to_string();
         ("count" = Option<i32>, Query, description = "Number of related videos to return (default: 50)"),
         ("offset" = Option<i32>, Query, description = "Offset for pagination (default: 0)"),
         ("limit" = Option<i32>, Query, description = "Limit for pagination (default: 50)"),
-        ("order" = Option<String>, Query, description = "Order of results (relevance, date, rating, viewCount, title) (default: 
-relevance)"),
+        ("order" = Option<String>, Query, description = "Order of results (relevance, date, rating, viewCount, title) (default: relevance)"),
         ("token" = Option<String>, Query, description = "Refresh token for InnerTube recommendations")
     ),
     responses(
@@ -2094,7 +2114,7 @@ pub async fn get_related_videos(
         .and_then(|o| o.parse().ok())
         .unwrap_or(0);
 
-    let desired_count = limit.max(20).min(100); // Target more videos like in Python script
+    let desired_count = limit.max(20).min(100);
 
     let client = Client::new();
     
@@ -2117,8 +2137,7 @@ pub async fn get_related_videos(
     let watch_url = format!("https://www.youtube.com/watch?v={}", video_id);
     let headers_map = {
         let mut map = reqwest::header::HeaderMap::new();
-        map.insert(reqwest::header::USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/121.0.0.0 Safari/537.36".parse().
-unwrap());
+        map.insert(reqwest::header::USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/121.0.0.0 Safari/537.36".parse().unwrap());
         map.insert(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9".parse().unwrap());
         map.insert(reqwest::header::CONTENT_TYPE, "application/json".parse().unwrap());
         map
@@ -2321,8 +2340,7 @@ pub async fn get_direct_video_url(
         ("video_id" = String, Query, description = "YouTube video ID"),
         ("quality" = Option<String>, Query, description = "Preferred quality"),
         ("proxy" = Option<String>, Query, description = "Pass-through proxy (true/false)"),
-        ("codec" = Option<String>, Query, description = "Video codec for optional conversion: mpeg4 or h263. If passed, quality will 
-be 360p")
+        ("codec" = Option<String>, Query, description = "Video codec for optional conversion: mpeg4 or h263. If passed, quality will be 360p")
     ),
     responses(
         (status = 200, description = "Video stream"),
@@ -2330,7 +2348,11 @@ be 360p")
     )
 )]
 pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> impl Responder {
-    spawn_direct_url_cleanup_if_needed();
+
+    let custom_temp_dir = data.config.cache.temp_dir.clone()
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty());
+    spawn_direct_url_cleanup_if_needed(custom_temp_dir);
 
     let mut query_params: HashMap<String, String> = HashMap::new();
     for pair in req.query_string().split('&') {
@@ -2349,7 +2371,6 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
         }
     };
 
-    // 1. Старые кодеки (всегда конвертация на лету)
     let codec = query_params.get("codec").map(|c| c.as_str());
 	if let Some(codec_str) = codec {
 		if codec_str != "mpeg4" && codec_str != "h263" {
@@ -2360,7 +2381,6 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
 			}));
 		}
 
-        // Get video duration and check if it's longer than 40 minutes
         let player_response = match fetch_player_response(&video_id, &data.config).await {
             Ok(data) => data,
             Err(e) => {
@@ -2380,20 +2400,16 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
 
 		let direct_url = match resolve_direct_stream_url(&video_id, Some("360"), false, &data.config).await {
 			Ok(url) => {
-            // ВАЖНО: Если сервер вернул HLS-ссылку (m3u8), а мы хотим MP4 - 
-            // это значит, что мы получили не то, что нужно. 
-            // Нужно принудительно переключиться на прямое скачивание MP4 через yt-dlp.
-            if url.contains(".m3u8") {
-                log::warn!("YT-DLP вернул HLS для {}, форсируем MP4-поиск...", video_id);
-                // Попробуем еще раз, но без указания качества (возьмем "best")
-                match resolve_direct_stream_url(&video_id, None, false, &data.config).await {
-                    Ok(u) => u,
-                    Err(_) => url, // Если не вышло, оставляем как есть
+                if url.contains(".m3u8") {
+                    log::warn!("YT-DLP вернул HLS для {}, форсируем MP4-поиск...", video_id);
+                    match resolve_direct_stream_url(&video_id, None, false, &data.config).await {
+                        Ok(u) => u,
+                        Err(_) => url,
+                    }
+                } else {
+                    url
                 }
-            } else {
-                url
-            }
-        },
+            },
 			Err(e) => {
 				return HttpResponse::InternalServerError().json(serde_json::json!({
 					"error": "Failed to resolve video url for conversion",
@@ -2403,10 +2419,19 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
 		};
 		let user_agent = data.config.get_innertube_user_agent();
 		let permit = data.codec_semaphore.clone().acquire_owned().await.ok();
-		return stream_converted_video(&direct_url, &user_agent, &video_id, codec_str, permit);
+
+
+        let tmp_for_conversion = data.config.cache.temp_dir.as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| env::temp_dir());
+        if let Err(e) = fs::create_dir_all(&tmp_for_conversion) {
+            log::warn!("Не удалось создать временную папку {}: {}", tmp_for_conversion.display(), e);
+        }
+
+		return stream_converted_video(&direct_url, &user_agent, &video_id, codec_str, permit, tmp_for_conversion);
 	}
 
-    // 2. HLS
     let hls_only = query_params.get("hls").map(|v| v == "true").unwrap_or(false);
     if hls_only {
         match get_hls_manifest_url(&video_id, &data.config).await {
@@ -2429,7 +2454,6 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
     let proxy_param = query_params.get("proxy").map(|p| p.to_lowercase()).unwrap_or_else(|| "true".to_string());
     let use_proxy = proxy_param != "false";
 
-    // Получаем инфо о видео
     let player_response = match fetch_player_response(&video_id, &data.config).await {
         Ok(data) => data,
         Err(e) => {
@@ -2447,22 +2471,16 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
         .and_then(|q| parse_quality_height(q))
         .unwrap_or_else(|| parse_quality_height(&data.config.video.default_quality).unwrap_or(360));
 
-    // --- ЛОГИКА КАЧЕСТВА ---
-
-    // 1. Длинные видео (> 30 мин) и высокое качество -> Форсируем 360p
     if target_height > 360 && duration_seconds > 1800 {
         log::info!("Video > 30m ({}s). Forcing 360p for stability.", duration_seconds);
         target_height = 360;
     }
 
-    // 2. Короткие видео (< 30 мин) и высокое качество -> Скачиваем целиком на сервер
-    // 2. Короткие видео (< 30 мин) и высокое качество -> Скачиваем целиком на сервер
-    // 2. Короткие видео (< 30 мин) и высокое качество -> Скачиваем целиком на сервер
     if target_height > 360 && use_proxy {
         log::info!("Short video ({}s) in {}p. Downloading full file via yt-dlp...", duration_seconds, target_height);
         
-        // Теперь здесь создастся файл вида yt_api_video_ID_1080p.mp4
-        match download_mux_to_temp_file(video_id.clone(), target_height).await {
+
+        match download_mux_to_temp_file(video_id.clone(), target_height, &data.config.cache).await {
             Ok(path) => {
                 log::info!("Download complete: {}. Serving file.", path.display());
                 return serve_mp4_from_cache(&path, &req, Some(duration_seconds));
@@ -2477,8 +2495,6 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
         }
     }
 
-    // 3. Fallback или 360p -> Прямая ссылка
-    // Сюда попадаем, если качество <= 360
     let direct_url = get_direct_stream_url_from_player_response(&player_response);
     
     let final_url = match direct_url {
@@ -3082,17 +3098,15 @@ fn serve_mp4_from_cache(
         (0, file_size - 1, actix_web::http::StatusCode::OK)
     };
 
-    // Открываем файл асинхронно через tokio
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(_) => return HttpResponse::InternalServerError().finish(),
     };
     
-    // Используем файловый поток вместо загрузки в Vec<u8>
     let mut f = tokio::fs::File::from_std(file);
     let stream = ReaderStream::with_capacity(
         tokio::io::BufReader::new(f), 
-        65536 // Читаем по 64 КБ
+        65536
     );
 
     let mut builder = HttpResponse::build(status);
@@ -3206,8 +3220,7 @@ async fn proxy_image(url: &str) -> HttpResponse {
     let processed_url = url.replace("s900", "s88");
     
     let client = Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-)
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
         .build()
         .unwrap();
 
@@ -3220,7 +3233,6 @@ async fn proxy_image(url: &str) -> HttpResponse {
                 .unwrap_or("image/jpeg")
                 .to_string();
 
-            // Validate that content type is an image
             if !content_type.starts_with("image/") {
                 crate::log::info!("Blocked non-image content-type: {} from URL: {}", content_type, url);
                 return HttpResponse::Forbidden()
@@ -3229,7 +3241,6 @@ async fn proxy_image(url: &str) -> HttpResponse {
                     }));
             }
 
-            // Additional validation: check for dangerous content types
             let allowed_image_types = [
                 "image/jpeg",
                 "image/jpg", 
@@ -3257,7 +3268,6 @@ async fn proxy_image(url: &str) -> HttpResponse {
 
             match resp.bytes().await {
                 Ok(bytes) => {
-                    // Additional security: verify the file starts with valid image magic bytes
                     if bytes.len() < 2 {
                         return HttpResponse::NotFound()
                             .json(serde_json::json!({
@@ -3265,25 +3275,16 @@ async fn proxy_image(url: &str) -> HttpResponse {
                             }));
                     }
 
-                    // Check magic bytes for common image formats
                     let is_valid_image = if bytes.len() >= 12 && bytes[0] == 0x52 && bytes[1] == 0x49 && &bytes[8..12] == b"WEBP" {
-                        // WebP: RIFF....WEBP
                         true
                     } else if bytes.len() >= 2 {
                         match (bytes[0], bytes[1]) {
-                            // JPEG: FF D8
                             (0xFF, 0xD8) => true,
-                            // PNG: 89 50 4E 47
                             (0x89, 0x50) => true,
-                            // GIF: 47 49 46
                             (0x47, 0x49) => true,
-                            // BMP: 42 4D
                             (0x42, 0x4D) => true,
-                            // TIFF: 49 49 or 4D 4D
                             (0x49, 0x49) | (0x4D, 0x4D) => true,
-                            // ICO: 00 00
                             (0x00, 0x00) => true,
-                            // For SVG and other formats, rely on content-type
                             _ => content_type.contains("svg") || content_type.contains("icon"),
                         }
                     } else {

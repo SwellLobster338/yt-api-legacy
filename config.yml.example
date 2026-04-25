@@ -42,6 +42,7 @@ proxy:
   video_proxy: true
 
 cache:
+  temp_dir: "/tmp" #при желании поменяйте на другую папку
   temp_folder_max_size_mb: 5120
   cleanup_threshold_mb: 100
 
