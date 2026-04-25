@@ -216,6 +216,14 @@ async fn download_mux_to_temp_file(
         log::info!("Muxing started for {} at {}p", video_id, height);
         
         let output = cmd.output().map_err(|e| e.to_string())?;
+		let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stdout.trim().is_empty() {
+            log::info!("yt-dlp stdout:\n{}", stdout);
+        }
+        if !stderr.trim().is_empty() {
+            log::info!("yt-dlp stderr:\n{}", stderr);
+        }
 
         if !output.status.success() {
             log::error!("yt-dlp exited with error status.");
@@ -2364,7 +2372,10 @@ be 360p")
     )
 )]
 pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> impl Responder {
-    spawn_direct_url_cleanup_if_needed();
+    let custom_temp_dir = data.config.cache.temp_dir.clone()
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty());
+    spawn_direct_url_cleanup_if_needed(custom_temp_dir);
 
     let mut query_params: HashMap<String, String> = HashMap::new();
     for pair in req.query_string().split('&') {
@@ -2535,7 +2546,7 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
     // Скачиваем DASH видео и аудио, склеиваем через ffmpeg
     log::info!("Target quality {}p requires server-side muxing for {}", target_height, video_id);
     
-    match download_mux_to_temp_file(video_id.clone(), target_height).await {
+    match download_mux_to_temp_file(video_id.clone(), target_height, &data.config.cache).await {
         Ok(path) => {
             log::info!("Download/mux complete: {}. Serving file via ReaderStream.", path.display());
             // Функция serve_mp4_from_cache теперь отдаёт поток и правильно отвечает на HEAD запросы
